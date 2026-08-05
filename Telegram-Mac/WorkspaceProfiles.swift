@@ -26,11 +26,53 @@ struct WorkspaceProfile: Codable, Equatable {
     var showsAllFolders: Bool
     var visibleFolderIds: [Int32]
     var receivesNotifications: Bool
+    var showsStories: Bool
+    var includedPeerIds: [Int64]
     /// Namespaced switches allow later features to become profile-scoped without a migration.
     var featureFlags: [String: Bool]
 
     func displays(folderId: Int32) -> Bool {
         return showsAllFolders || visibleFolderIds.contains(folderId)
+    }
+}
+
+extension WorkspaceProfile {
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case kind
+        case showsAllFolders
+        case visibleFolderIds
+        case receivesNotifications
+        case showsStories
+        case includedPeerIds
+        case featureFlags
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.name = try container.decode(String.self, forKey: .name)
+        self.kind = try container.decode(WorkspaceProfileKind.self, forKey: .kind)
+        self.showsAllFolders = try container.decodeIfPresent(Bool.self, forKey: .showsAllFolders) ?? true
+        self.visibleFolderIds = try container.decodeIfPresent([Int32].self, forKey: .visibleFolderIds) ?? []
+        self.receivesNotifications = try container.decodeIfPresent(Bool.self, forKey: .receivesNotifications) ?? true
+        self.showsStories = try container.decodeIfPresent(Bool.self, forKey: .showsStories) ?? true
+        self.includedPeerIds = try container.decodeIfPresent([Int64].self, forKey: .includedPeerIds) ?? []
+        self.featureFlags = try container.decodeIfPresent([String: Bool].self, forKey: .featureFlags) ?? [:]
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(showsAllFolders, forKey: .showsAllFolders)
+        try container.encode(visibleFolderIds, forKey: .visibleFolderIds)
+        try container.encode(receivesNotifications, forKey: .receivesNotifications)
+        try container.encode(showsStories, forKey: .showsStories)
+        try container.encode(includedPeerIds, forKey: .includedPeerIds)
+        try container.encode(featureFlags, forKey: .featureFlags)
     }
 }
 
@@ -62,6 +104,8 @@ struct WorkspaceProfileState: Codable, Equatable {
             showsAllFolders: true,
             visibleFolderIds: [],
             receivesNotifications: true,
+            showsStories: true,
+            includedPeerIds: [],
             featureFlags: [:]
         )
         let home = WorkspaceProfile(
@@ -71,6 +115,8 @@ struct WorkspaceProfileState: Codable, Equatable {
             showsAllFolders: true,
             visibleFolderIds: [],
             receivesNotifications: true,
+            showsStories: true,
+            includedPeerIds: [],
             featureFlags: [:]
         )
         return WorkspaceProfileState(
@@ -87,6 +133,7 @@ struct WorkspaceProfileState: Codable, Equatable {
 }
 
 final class WorkspaceProfileStore {
+    static let profileChatsFilterId = Int32.min
     private static let registryLock = NSLock()
     private static var registry: [Int64: WorkspaceProfileStore] = [:]
 
@@ -160,6 +207,8 @@ final class WorkspaceProfileStore {
                 showsAllFolders: true,
                 visibleFolderIds: [],
                 receivesNotifications: true,
+                showsStories: true,
+                includedPeerIds: [],
                 featureFlags: [:]
             )
             state.profiles.append(profile)
@@ -191,11 +240,54 @@ final class WorkspaceProfileStore {
         }
     }
 
+    func profileChatsFilter(for profile: WorkspaceProfile? = nil) -> ChatListFilter? {
+        let profile = profile ?? current.activeProfile
+        let peerIds = profile.includedPeerIds.map(PeerId.init)
+        guard !peerIds.isEmpty else {
+            return nil
+        }
+        var includePeers = ChatListFilterIncludePeers()
+        includePeers.setPeers(peerIds)
+        let data = ChatListFilterData(
+            isShared: false,
+            hasSharedLinks: false,
+            categories: [],
+            excludeMuted: false,
+            excludeRead: false,
+            excludeArchived: false,
+            includePeers: includePeers,
+            excludePeers: [],
+            color: nil
+        )
+        return .filter(
+            id: WorkspaceProfileStore.profileChatsFilterId,
+            title: ChatFolderTitle(text: "\(profile.name) Chats", entities: [], enableAnimations: true),
+            emoticon: "💬",
+            data: data
+        )
+    }
+
+    private func includingProfileChats(_ filter: ChatListFilter, profile: WorkspaceProfile) -> ChatListFilter {
+        guard case let .filter(id, title, emoticon, sourceData) = filter else {
+            return filter
+        }
+        var data = sourceData
+        for peerId in profile.includedPeerIds.map(PeerId.init) {
+            _ = data.addIncludePeer(peerId: peerId)
+        }
+        return .filter(id: id, title: title, emoticon: emoticon, data: data)
+    }
+
     func visibleFilters(_ filters: [ChatListFilter]) -> [ChatListFilter] {
         let profile = current.activeProfile
-        let visible = filters.filter { profile.displays(folderId: $0.id) }
+        var visible = filters.filter { profile.displays(folderId: $0.id) }.map {
+            includingProfileChats($0, profile: profile)
+        }
         if visible.isEmpty, let allChats = filters.first(where: { $0.isAllChats }) {
-            return [allChats]
+            visible = [allChats]
+        }
+        if let profileFilter = profileChatsFilter(for: profile) {
+            visible.insert(profileFilter, at: 0)
         }
         return visible
     }
@@ -507,6 +599,7 @@ private let workspaceACPExecutableId = InputDataIdentifier("workspace.acp.execut
 private let workspaceACPDirectoryId = InputDataIdentifier("workspace.acp.directory")
 
 private func workspaceProfileEntries(
+    context: AccountContext,
     state: WorkspaceProfileState,
     filters: [ChatListFilter],
     acpStatus: WorkspaceACPStatus,
@@ -547,6 +640,33 @@ private func workspaceProfileEntries(
     entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.notifications"), data: .init(name: "Receive Notifications", color: theme.colors.text, type: .switchable(active.receivesNotifications), viewType: .singleItem, action: {
         store.updateActive { $0.receivesNotifications.toggle() }
     }, autoswitch: false)))
+    index += 1
+    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.stories"), data: .init(name: "Show Stories", color: theme.colors.text, type: .switchable(active.showsStories), viewType: .singleItem, action: {
+        store.updateActive { $0.showsStories.toggle() }
+    }, autoswitch: false)))
+    index += 1
+    let profileChatCount = active.includedPeerIds.count
+    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.chats"), data: .init(name: "Profile Chats", color: theme.colors.text, type: .nextContext(profileChatCount == 0 ? "None" : "\(profileChatCount)"), viewType: .singleItem, action: {
+        let selectedPeerIds = Set(active.includedPeerIds.map(PeerId.init))
+        let behavior = SelectChatsBehavior(settings: [.contacts, .remote, .groups, .channels, .bots], excludePeerIds: [], limit: 200)
+        _ = selectModalPeers(
+            window: context.window,
+            context: context,
+            title: "Chats in \(active.name)",
+            settings: [.contacts, .remote, .groups, .channels, .bots],
+            excludePeerIds: [],
+            limit: 200,
+            behavior: behavior,
+            selectedPeerIds: selectedPeerIds,
+            okTitle: strings().modalOK
+        ).start(next: { peerIds in
+            store.updateActive { profile in
+                profile.includedPeerIds = peerIds.map { $0.toInt64() }
+            }
+        })
+    })))
+    index += 1
+    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Selected chats appear in a dedicated profile tab and are always included in this profile's folder views. If chats are selected, profile notifications are limited to them."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
     index += 1
     entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.folders.all"), data: .init(name: "Show All Chat Folders", color: theme.colors.text, type: .switchable(active.showsAllFolders), viewType: .singleItem, action: {
         store.updateActive { $0.showsAllFolders.toggle() }
@@ -611,7 +731,7 @@ func WorkspaceProfilesController(context: AccountContext) -> InputDataController
     let filters = chatListFilterPreferences(engine: context.engine) |> map { $0.list }
     let signal = combineLatest(queue: prepareQueue, appearanceSignal, store.signal, filters, client.status)
     |> map { _, state, filters, acpStatus in
-        return InputDataSignalValue(entries: workspaceProfileEntries(state: state, filters: filters, acpStatus: acpStatus, store: store, client: client))
+        return InputDataSignalValue(entries: workspaceProfileEntries(context: context, state: state, filters: filters, acpStatus: acpStatus, store: store, client: client))
     }
     let controller = InputDataController(dataSignal: signal, title: "Profiles & Automation", removeAfterDisappear: false, hasDone: false, identifier: "workspace_profiles")
     controller.updateDatas = { data in

@@ -478,9 +478,11 @@ final class SharedNotificationManager : NSObject, NSUserNotificationCenterDelega
                     return .complete()
                 }
             } |> deliverOnMainQueue).start(next: { sources, images, inAppSettings, screenIsLocked, accountPeer, soundPath, notifications in
-                guard WorkspaceProfileStore.shared(accountId: account.id.int64).current.activeProfile.receivesNotifications else {
+                let workspaceProfile = WorkspaceProfileStore.shared(accountId: account.id.int64).current.activeProfile
+                guard workspaceProfile.receivesNotifications else {
                     return
                 }
+                let profilePeerIds = Set(workspaceProfile.includedPeerIds)
                 
                 if !primary, !inAppSettings.notifyAllAccounts {
                     return
@@ -488,6 +490,10 @@ final class SharedNotificationManager : NSObject, NSUserNotificationCenterDelega
 
                 for source in sources {
                     loop: for message in source.messages {
+                        let notificationPeerId = message.sourceReference?.messageId.peerId ?? message.id.peerId
+                        if !profilePeerIds.isEmpty, !profilePeerIds.contains(notificationPeerId.toInt64()) {
+                            continue
+                        }
                         
                         if alreadyNotified.contains(source.key(for: message)) {
                             continue

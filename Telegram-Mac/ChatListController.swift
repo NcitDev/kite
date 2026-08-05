@@ -530,7 +530,7 @@ enum UIChatListEntry : Identifiable, Comparable {
 
 
 
-fileprivate func prepareEntries(from:[AppearanceWrapperEntry<UIChatListEntry>]?, to:[AppearanceWrapperEntry<UIChatListEntry>], adIndex: UInt16?, arguments: Arguments, initialSize:NSSize, animated:Bool, scrollState:TableScrollState? = nil, groupId: EngineChatList.Group, listMode: PeerListMode) -> Signal<TableUpdateTransition, NoError> {
+fileprivate func prepareEntries(from:[AppearanceWrapperEntry<UIChatListEntry>]?, to:[AppearanceWrapperEntry<UIChatListEntry>], adIndex: UInt16?, arguments: Arguments, initialSize:NSSize, animated:Bool, scrollState:TableScrollState? = nil, groupId: EngineChatList.Group, listMode: PeerListMode, showStories: Bool) -> Signal<TableUpdateTransition, NoError> {
     
     return Signal { subscriber in
                 
@@ -557,7 +557,7 @@ fileprivate func prepareEntries(from:[AppearanceWrapperEntry<UIChatListEntry>]?,
                     }
                 }
                 
-                return ChatListRowItem(initialSize, context: arguments.context, stableId: entry.entry.stableId, mode: mode, messages: messages, index: entry.entry.index, readState: item.readCounters, draft: item.draft, pinnedType: pinnedType, renderedPeer: item.renderedPeer, peerPresence: item.presence, forumTopicData: item.forumTopicData, forumTopicItems: item.topForumTopicItems, activities: activities, associatedGroupId: groupId, isMuted: item.isMuted, hasFailed: item.hasFailed, hasUnreadMentions: item.hasUnseenMentions, hasUnreadReactions: item.hasUnseenReactions, filter: filter, hideStatus: hideStatus, appearMode: appearMode, hideContent: hideContent, getHideProgress: arguments.getHideProgress, selectedForum: selectedForum, autoremoveTimeout: item.autoremoveTimeout, story: item.storyStats, openStory: arguments.openStory, isContact: item.isContact, displayAsTopics: item.displayAsTopicList, folders: filterData, canPreviewChat: previewChat)
+                return ChatListRowItem(initialSize, context: arguments.context, stableId: entry.entry.stableId, mode: mode, messages: messages, index: entry.entry.index, readState: item.readCounters, draft: item.draft, pinnedType: pinnedType, renderedPeer: item.renderedPeer, peerPresence: item.presence, forumTopicData: item.forumTopicData, forumTopicItems: item.topForumTopicItems, activities: activities, associatedGroupId: groupId, isMuted: item.isMuted, hasFailed: item.hasFailed, hasUnreadMentions: item.hasUnseenMentions, hasUnreadReactions: item.hasUnseenReactions, filter: filter, hideStatus: hideStatus, appearMode: appearMode, hideContent: hideContent, getHideProgress: arguments.getHideProgress, selectedForum: selectedForum, autoremoveTimeout: item.autoremoveTimeout, story: showStories ? item.storyStats : nil, openStory: arguments.openStory, isContact: item.isContact, displayAsTopics: item.displayAsTopicList, folders: filterData, canPreviewChat: previewChat)
 
             case let .group(_, item, animated, hideStatus, appearMode, hideContent, storyState):
                 var messages:[Message] = []
@@ -932,9 +932,15 @@ class ChatListController : PeersListController {
         //            self.storyList =
 
         
+        let workspaceProfiles = WorkspaceProfileStore.shared(accountId: context.account.id.int64)
         let storyState: Signal<EngineStorySubscriptions?, NoError>
         if self.mode.groupId == .root {
-            storyState = context.engine.messages.storySubscriptions(isHidden: true) |> map(Optional.init)
+            storyState = combineLatest(
+                context.engine.messages.storySubscriptions(isHidden: true),
+                workspaceProfiles.signal
+            ) |> map { stories, profileState in
+                return profileState.activeProfile.showsStories ? Optional(stories) : nil
+            }
         } else {
             storyState = .single(nil)
         }
@@ -1151,7 +1157,7 @@ class ChatListController : PeersListController {
                 bp += 1
             }
             
-            return prepareEntries(from: previousEntries.swap(entries), to: entries, adIndex: nil, arguments: arguments, initialSize: initialSize.with { $0 }, animated: animated, scrollState: scroll, groupId: groupId, listMode: mode)
+            return prepareEntries(from: previousEntries.swap(entries), to: entries, adIndex: nil, arguments: arguments, initialSize: initialSize.with { $0 }, animated: animated, scrollState: scroll, groupId: groupId, listMode: mode, showStories: storyState != nil)
         }
         
         
@@ -1262,7 +1268,6 @@ class ChatListController : PeersListController {
         
         let filterView = chatListFilterPreferences(engine: context.engine) |> deliverOnMainQueue |> distinctUntilChanged
         let filterBadges = chatListFilterItems(engine: context.engine, accountManager: context.sharedContext.accountManager) |> deliverOnMainQueue |> distinctUntilChanged
-        let workspaceProfiles = WorkspaceProfileStore.shared(accountId: context.account.id.int64)
         
         switch mode {
         case let .filter(filterId):
@@ -1285,14 +1290,21 @@ class ChatListController : PeersListController {
                 }
             }))
         case .folder:
-            filterDisposable.set(combineLatest(filterView, workspaceProfiles.signal |> deliverOnMainQueue).start(next: { [weak self] filters, _ in
+            var previousProfileId: String?
+            filterDisposable.set(combineLatest(filterView, workspaceProfiles.signal |> deliverOnMainQueue).start(next: { [weak self] filters, profileState in
+                let didSwitchProfile = previousProfileId != profileState.activeProfileId
+                previousProfileId = profileState.activeProfileId
                 self?.updateFilter( { current in
                     var current = current
                     let visibleFilters = workspaceProfiles.visibleFilters(filters.list)
                     current = current.withUpdatedTabs(visibleFilters)
                         .withUpdatedSidebar(filters.sidebar)
                         .withUpdatedShowTags(filters.showTags)
-                    if !visibleFilters.contains(where: { $0.id == current.filter.id }) {
+                    if didSwitchProfile, let profileChats = workspaceProfiles.profileChatsFilter(for: profileState.activeProfile) {
+                        current = current.withUpdatedFilter(profileChats)
+                    } else if let updated = visibleFilters.first(where: { $0.id == current.filter.id }) {
+                        current = current.withUpdatedFilter(updated)
+                    } else {
                         current = current.withUpdatedFilter(nil)
                     }
                     return current
@@ -1300,14 +1312,19 @@ class ChatListController : PeersListController {
             }))
         default:
             var first: Bool = true
-            filterDisposable.set(combineLatest(filterView, filterBadges, workspaceProfiles.signal |> deliverOnMainQueue).start(next: { [weak self] filters, badges, _ in
+            var previousProfileId: String?
+            filterDisposable.set(combineLatest(filterView, filterBadges, workspaceProfiles.signal |> deliverOnMainQueue).start(next: { [weak self] filters, badges, profileState in
+                let didSwitchProfile = previousProfileId != profileState.activeProfileId
+                previousProfileId = profileState.activeProfileId
                 self?.updateFilter( { current in
                     var current = current
                     let visibleFilters = workspaceProfiles.visibleFilters(filters.list)
                     current = current.withUpdatedTabs(visibleFilters)
                         .withUpdatedSidebar(filters.sidebar)
                         .withUpdatedShowTags(filters.showTags)
-                    if !first, let updated = visibleFilters.first(where: { $0.id == current.filter.id }) {
+                    if didSwitchProfile, let profileChats = workspaceProfiles.profileChatsFilter(for: profileState.activeProfile) {
+                        current = current.withUpdatedFilter(profileChats)
+                    } else if !first, let updated = visibleFilters.first(where: { $0.id == current.filter.id }) {
                         current = current.withUpdatedFilter(updated)
                     } else {
                         current = current.withUpdatedFilter(nil)

@@ -2224,7 +2224,17 @@ class PeersListController: TelegramGenericViewController<PeerListContainerView>,
             self.topics = nil
         }
         if mode.isPlain {
-            self.storyList = context.engine.messages.storySubscriptions(isHidden: isContacts || mode.groupId == .archive)
+            let workspaceProfiles = WorkspaceProfileStore.shared(accountId: context.account.id.int64)
+            self.storyList = combineLatest(
+                context.engine.messages.storySubscriptions(isHidden: isContacts || mode.groupId == .archive),
+                workspaceProfiles.signal
+            ) |> map { stories, profileState in
+                if profileState.activeProfile.showsStories {
+                    return stories
+                } else {
+                    return EngineStorySubscriptions(accountItem: nil, items: [], hasMoreToken: nil)
+                }
+            }
         } else {
             self.storyList = nil
         }
@@ -2707,12 +2717,19 @@ class PeersListController: TelegramGenericViewController<PeerListContainerView>,
             }
             self?.scrollup(force: true)
         }, openFilterSettings: { filter in
-            if case .filter = filter {
+            if filter.id == WorkspaceProfileStore.profileChatsFilterId {
+                context.bindings.rootNavigation().push(WorkspaceProfilesController(context: context))
+            } else if case .filter = filter {
                 context.bindings.rootNavigation().push(ChatListFilterController(context: context, filter: filter))
             } else {
                 context.bindings.rootNavigation().push(ChatListFiltersListController(context: context))
             }
         }, tabsMenuItems: { filter, unreadCount, allMuted in
+            if filter.id == WorkspaceProfileStore.profileChatsFilterId {
+                return [ContextMenuItem("Manage Profile Chats…", handler: {
+                    context.bindings.rootNavigation().push(WorkspaceProfilesController(context: context))
+                })]
+            }
             return filterContextMenuItems(filter, unreadCount: unreadCount, includeAllMuted: allMuted, context: context)
         }, getController: { [weak self] in
             return self
@@ -3890,4 +3907,3 @@ class PeersListController: TelegramGenericViewController<PeerListContainerView>,
 
         
 }
-

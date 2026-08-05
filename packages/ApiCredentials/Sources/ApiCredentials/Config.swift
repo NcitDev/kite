@@ -9,7 +9,7 @@ public final class ApiEnvironment {
     }
     
     public static var bundleId: String {
-        return "ru.keepcoder.Telegram"
+        return "dev.telegramwork.Telegram"
     }
     public static var intentsBundleId: String {
         return teamId + "." + bundleId + ".FocusIntents"
@@ -115,6 +115,5 @@ public final class ApiEnvironment {
         return "org.telegram.telegramPremium.monthly"
     }
 }
-
 
 

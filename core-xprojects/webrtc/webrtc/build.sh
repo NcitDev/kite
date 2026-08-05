@@ -19,6 +19,7 @@ mkdir -p $BUILD_DIR || true
 
 
 cp -R $SOURCE_DIR $BUILD_DIR
+patch -p1 -d "$BUILD_DIR/src" < "$PROJECT_DIR/webrtc/clang-21.patch"
 
 
 

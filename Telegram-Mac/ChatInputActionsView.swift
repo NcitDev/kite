@@ -722,19 +722,22 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
     private let chatInteraction: ChatInteraction
     private let store: WorkspaceProfileStore
     private let client: WorkspaceACPClient
+    private let coordinator: WorkspaceAIJobCoordinator
     private let historyStore: CodexAssistantHistoryStore
     private let statusDisposable = MetaDisposable()
-    private let eventsDisposable = MetaDisposable()
     private let historyDisposable = MetaDisposable()
     private var activeAction: CodexAssistantAction?
+    private var activeJobId: UUID?
     private var response = ""
     private var currentStatus: WorkspaceACPStatus = .disconnected
 
     init(chatInteraction: ChatInteraction) {
         let store = WorkspaceProfileStore.shared(accountId: chatInteraction.context.account.id.int64)
+        let client = WorkspaceACPRegistry.shared.client(accountId: chatInteraction.context.account.id.int64)
         self.chatInteraction = chatInteraction
         self.store = store
-        self.client = WorkspaceACPRegistry.shared.client(accountId: chatInteraction.context.account.id.int64)
+        self.client = client
+        self.coordinator = WorkspaceAIJobCoordinatorRegistry.shared.coordinator(accountId: chatInteraction.context.account.id.int64, client: client)
         self.historyStore = CodexAssistantHistoryStore(
             accountId: chatInteraction.context.account.id.int64,
             profileId: store.current.activeProfile.id,
@@ -777,14 +780,6 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
         }))
 
         genericView.updateHistory(historyStore.entries)
-
-        eventsDisposable.set((client.events |> deliverOnMainQueue).start(next: { [weak self] event in
-            guard let self, let action = self.activeAction, let chunk = self.textChunk(from: event.update), !chunk.isEmpty else {
-                return
-            }
-            self.response += chunk
-            self.genericView.appendResult(chunk, action: action)
-        }))
 
         readyOnce()
     }
@@ -846,8 +841,8 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
             return
         }
 
-        if activeAction != nil {
-            client.cancelCurrentPrompt()
+        if let activeJobId {
+            coordinator.cancel(activeJobId)
         }
         activeAction = action
         let dateRange = genericView.selectedDateRange
@@ -958,32 +953,35 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
     }
 
     private func send(prompt: String, action: CodexAssistantAction, customPrompt: String?, dateRange: ClosedRange<Date>) {
-        client.prompt(prompt) { [weak self] result in
-            DispatchQueue.main.async {
-                guard let self, self.activeAction == action else { return }
-                switch result {
-                case .success:
-                    if self.response.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        self.genericView.setResult("Codex finished without a text response.", action: nil, loading: false)
-                    } else {
-                        self.genericView.setResult(self.response, action: action, loading: false)
-                        let entry = CodexAssistantHistoryEntry(
-                            id: UUID(),
-                            action: action,
-                            customPrompt: customPrompt,
-                            fromDate: dateRange.lowerBound,
-                            toDate: dateRange.upperBound,
-                            createdAt: Date(),
-                            response: String(self.response.prefix(50_000))
-                        )
-                        self.genericView.updateHistory(self.historyStore.add(entry))
-                    }
-                case let .failure(error):
-                    self.genericView.setResult(error.localizedDescription, action: nil, loading: false)
+        activeJobId = coordinator.submit(prompt: prompt, onText: { [weak self] chunk in
+            guard let self, self.activeAction == action else { return }
+            self.response += chunk
+            self.genericView.appendResult(chunk, action: action)
+        }, completion: { [weak self] result in
+            guard let self, self.activeAction == action else { return }
+            self.activeJobId = nil
+            switch result {
+            case let .success(text):
+                self.response = text
+                self.genericView.setResult(text, action: action, loading: false)
+                let entry = CodexAssistantHistoryEntry(
+                    id: UUID(),
+                    action: action,
+                    customPrompt: customPrompt,
+                    fromDate: dateRange.lowerBound,
+                    toDate: dateRange.upperBound,
+                    createdAt: Date(),
+                    response: String(text.prefix(50_000))
+                )
+                self.genericView.updateHistory(self.historyStore.add(entry))
+            case let .failure(error):
+                if let jobError = error as? WorkspaceAIJobError, case .cancelled = jobError {
+                    break
                 }
-                self.activeAction = nil
+                self.genericView.setResult(error.localizedDescription, action: nil, loading: false)
             }
-        }
+            self.activeAction = nil
+        })
     }
 
     private func dateRangeDescription(_ range: ClosedRange<Date>) -> String {
@@ -993,28 +991,11 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
         return "\(formatter.string(from: range.lowerBound)) through \(formatter.string(from: range.upperBound)), inclusive"
     }
 
-    private func textChunk(from update: [String: Any]) -> String? {
-        let kind = (update["sessionUpdate"] as? String) ?? (update["type"] as? String) ?? ""
-        guard kind.isEmpty || kind.contains("agent_message") || kind == "message" else {
-            return nil
-        }
-        if let content = update["content"] as? [String: Any],
-           (content["type"] as? String) == "text",
-           let text = content["text"] as? String {
-            return text
-        }
-        if let text = update["text"] as? String {
-            return text
-        }
-        return nil
-    }
-
     deinit {
-        if activeAction != nil {
-            client.cancelCurrentPrompt()
+        if let activeJobId {
+            coordinator.cancel(activeJobId)
         }
         statusDisposable.dispose()
-        eventsDisposable.dispose()
         historyDisposable.dispose()
     }
 }

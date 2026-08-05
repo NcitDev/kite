@@ -33,6 +33,7 @@ private enum ApplicationSpecificPreferencesKeyValues: Int32 {
     case downloadedPaths = 53
     case someSettings = 54
     case dockSettings = 55
+    case workspaceAIState = 56
 }
 
 public struct ApplicationSpecificPreferencesKeys {
@@ -48,6 +49,7 @@ public struct ApplicationSpecificPreferencesKeys {
     public static let chatListSettings = applicationSpecificPreferencesKey(ApplicationSpecificPreferencesKeyValues.chatListSettings.rawValue)
     public static let voipDerivedState = applicationSpecificPreferencesKey(ApplicationSpecificPreferencesKeyValues.voipDerivedState.rawValue)
     public static let someSettings = applicationSpecificPreferencesKey(ApplicationSpecificPreferencesKeyValues.someSettings.rawValue)
+    public static let workspaceAIState = applicationSpecificPreferencesKey(ApplicationSpecificPreferencesKeyValues.workspaceAIState.rawValue)
 }
 
 public struct ApplicationSharedPreferencesKeys {

@@ -78,6 +78,10 @@ struct WorkspaceProfile: Codable, Equatable {
     var featureFlags: [String: Bool]
     /// Knowledge integrations are profile-scoped so Work and Home never share sources implicitly.
     var knowledgeIntegrations: [WorkspaceKnowledgeIntegration]
+    /// Generation behavior is profile-scoped so different workspaces can use different AI flows.
+    var aiWorkflow: WorkspaceAIWorkflowSettings
+    /// Native Telegram mutations are approved by stable capability identifier, never display text.
+    var aiApprovals: [String: WorkspaceAIApprovalDecision]
 
     func displays(folderId: Int32) -> Bool {
         return showsAllFolders || visibleFolderIds.contains(folderId)
@@ -85,6 +89,10 @@ struct WorkspaceProfile: Codable, Equatable {
 
     func isEnabled(_ feature: WorkspaceAIFeature) -> Bool {
         return featureFlags[feature.rawValue] ?? false
+    }
+
+    func approvalDecision(for capability: WorkspaceAICapability) -> WorkspaceAIApprovalDecision {
+        return aiApprovals[capability.rawValue] ?? .ask
     }
 }
 
@@ -100,6 +108,8 @@ extension WorkspaceProfile {
         case includedPeerIds
         case featureFlags
         case knowledgeIntegrations
+        case aiWorkflow
+        case aiApprovals
     }
 
     init(from decoder: Decoder) throws {
@@ -114,6 +124,9 @@ extension WorkspaceProfile {
         self.includedPeerIds = try container.decodeIfPresent([Int64].self, forKey: .includedPeerIds) ?? []
         self.featureFlags = try container.decodeIfPresent([String: Bool].self, forKey: .featureFlags) ?? [:]
         self.knowledgeIntegrations = try container.decodeIfPresent([WorkspaceKnowledgeIntegration].self, forKey: .knowledgeIntegrations) ?? []
+        self.aiWorkflow = try container.decodeIfPresent(WorkspaceAIWorkflowSettings.self, forKey: .aiWorkflow) ?? .focused
+        self.aiWorkflow.normalize()
+        self.aiApprovals = try container.decodeIfPresent([String: WorkspaceAIApprovalDecision].self, forKey: .aiApprovals) ?? [:]
     }
 
     func encode(to encoder: Encoder) throws {
@@ -128,6 +141,8 @@ extension WorkspaceProfile {
         try container.encode(includedPeerIds, forKey: .includedPeerIds)
         try container.encode(featureFlags, forKey: .featureFlags)
         try container.encode(knowledgeIntegrations, forKey: .knowledgeIntegrations)
+        try container.encode(aiWorkflow, forKey: .aiWorkflow)
+        try container.encode(aiApprovals, forKey: .aiApprovals)
     }
 }
 
@@ -260,7 +275,9 @@ struct WorkspaceProfileState: Codable, Equatable {
             showsStories: true,
             includedPeerIds: [],
             featureFlags: [:],
-            knowledgeIntegrations: []
+            knowledgeIntegrations: [],
+            aiWorkflow: .focused,
+            aiApprovals: [:]
         )
         let home = WorkspaceProfile(
             id: "builtin.home",
@@ -272,10 +289,12 @@ struct WorkspaceProfileState: Codable, Equatable {
             showsStories: true,
             includedPeerIds: [],
             featureFlags: [:],
-            knowledgeIntegrations: []
+            knowledgeIntegrations: [],
+            aiWorkflow: .focused,
+            aiApprovals: [:]
         )
         return WorkspaceProfileState(
-            schemaVersion: 2,
+            schemaVersion: 3,
             activeProfileId: work.id,
             profiles: [work, home],
             acp: .defaultValue
@@ -311,8 +330,9 @@ final class WorkspaceProfileStore {
         self.storageKey = "workspace-profiles.v1.\(accountId)"
         let decoded: WorkspaceProfileState
         if let data = UserDefaults.standard.data(forKey: self.storageKey),
-           let state = try? JSONDecoder().decode(WorkspaceProfileState.self, from: data),
+           var state = try? JSONDecoder().decode(WorkspaceProfileState.self, from: data),
            !state.profiles.isEmpty {
+            state.schemaVersion = max(state.schemaVersion, 3)
             decoded = state
         } else {
             decoded = .defaultValue
@@ -365,7 +385,9 @@ final class WorkspaceProfileStore {
                 showsStories: true,
                 includedPeerIds: [],
                 featureFlags: [:],
-                knowledgeIntegrations: []
+                knowledgeIntegrations: [],
+                aiWorkflow: .focused,
+                aiApprovals: [:]
             )
             state.profiles.append(profile)
             state.activeProfileId = profile.id

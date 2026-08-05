@@ -308,6 +308,7 @@ struct WorkspaceProfileState: Codable, Equatable {
 
 final class WorkspaceProfileStore {
     static let profileChatsFilterId = Int32.min
+    static let aiInboxFilterId = Int32.min + 1
     private static let registryLock = NSLock()
     private static var registry: [Int64: WorkspaceProfileStore] = [:]
 
@@ -461,6 +462,29 @@ final class WorkspaceProfileStore {
         )
     }
 
+    func aiInboxFilter(for profile: WorkspaceProfile? = nil) -> ChatListFilter {
+        let profile = profile ?? current.activeProfile
+        var includePeers = ChatListFilterIncludePeers()
+        includePeers.setPeers(profile.includedPeerIds.map(PeerId.init).filter { $0.namespace != Namespaces.Peer.SecretChat })
+        let data = ChatListFilterData(
+            isShared: false,
+            hasSharedLinks: false,
+            categories: [],
+            excludeMuted: false,
+            excludeRead: false,
+            excludeArchived: false,
+            includePeers: includePeers,
+            excludePeers: [],
+            color: nil
+        )
+        return .filter(
+            id: WorkspaceProfileStore.aiInboxFilterId,
+            title: ChatFolderTitle(text: "AI Inbox", entities: [], enableAnimations: true),
+            emoticon: "✨",
+            data: data
+        )
+    }
+
     private func includingProfileChats(_ filter: ChatListFilter, profile: WorkspaceProfile) -> ChatListFilter {
         guard case let .filter(id, title, emoticon, sourceData) = filter else {
             return filter
@@ -483,6 +507,7 @@ final class WorkspaceProfileStore {
         if let profileFilter = profileChatsFilter(for: profile) {
             visible.insert(profileFilter, at: 0)
         }
+        visible.insert(aiInboxFilter(for: profile), at: min(visible.count, profileChatsFilter(for: profile) == nil ? 0 : 1))
         return visible
     }
 }

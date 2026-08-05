@@ -98,7 +98,7 @@ private final class WorkspaceAIInboxGenerator {
                 let matching = value.0.entries.map(\.message).filter { message in
                     range.contains(Date(timeIntervalSince1970: TimeInterval(message.timestamp)))
                 }
-                let title = matching.first?.message.peers[peerId]?.displayTitle ?? "Chat"
+                let title = matching.first?.peers[peerId]?.displayTitle ?? "Chat"
                 return WorkspaceAIChatTranscript(peerId: peerId, title: title, messages: Array(matching.suffix(200)))
             }
         }
@@ -351,8 +351,8 @@ private func workspaceAIInboxEntries(
         color: local.isGenerating ? theme.colors.grayText : theme.colors.accent,
         type: local.isGenerating ? .none : .next,
         viewType: .singleItem,
-        action: local.isGenerating ? nil : openRange,
-        enabled: !local.isGenerating
+        enabled: !local.isGenerating,
+        action: local.isGenerating ? nil : openRange
     )))
     index += 1
     if let statusText = local.statusText {
@@ -430,7 +430,7 @@ func WorkspaceAIInboxController(context: AccountContext) -> InputDataController 
 
     let openInsight: (WorkspaceAIInsight, WorkspaceAIMessageReference?) -> Void = { insight, source in
         let peerId = PeerId(insight.peerId)
-        let focus = source.map { ChatFocusTarget(messageId: MessageId(peerId: peerId, namespace: $0.namespace, id: $0.id)) }
+        let focus = source.flatMap { ChatFocusTarget(messageId: MessageId(peerId: peerId, namespace: $0.namespace, id: $0.id)) }
         navigateToChat(navigation: context.bindings.rootNavigation(), context: context, chatLocation: .peer(peerId), focusTarget: focus)
     }
     let useSuggestion: (WorkspaceAIInsight, WorkspaceAISuggestion) -> Void = { insight, suggestion in
@@ -501,7 +501,9 @@ func WorkspaceAIInboxController(context: AccountContext) -> InputDataController 
         }
     }
     loadPeerTitles(store.current.activeProfile)
-    peerDisposable.add((store.signal |> deliverOnMainQueue).start(next: loadPeerTitles))
+    peerDisposable.add((store.signal |> deliverOnMainQueue).start(next: { state in
+        loadPeerTitles(state.activeProfile)
+    }))
     controller.onDeinit = {
         peerDisposable.dispose()
         _ = generator

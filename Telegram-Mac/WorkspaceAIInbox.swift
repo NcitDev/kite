@@ -114,7 +114,7 @@ private final class WorkspaceAIInboxGenerator {
         self.coordinator = WorkspaceAIJobCoordinatorRegistry.shared.coordinator(accountId: context.account.id.int64, client: client)
     }
 
-    func generate(profile: WorkspaceProfile, range: ClosedRange<Date>, completion: @escaping (Result<Int, Error>) -> Void) {
+    func generate(profile: WorkspaceProfile, range: ClosedRange<Date>, triggerId: String = "manual", completion: @escaping (Result<Int, Error>) -> Void) {
         if let jobId {
             coordinator.cancel(jobId)
             self.jobId = nil
@@ -126,11 +126,11 @@ private final class WorkspaceAIInboxGenerator {
                 completion(.failure(WorkspaceAIInboxGenerationError.notConnected))
                 return
             }
-            self.loadTranscripts(profile: profile, range: range, completion: completion)
+            self.loadTranscripts(profile: profile, range: range, triggerId: triggerId, completion: completion)
         }))
     }
 
-    private func loadTranscripts(profile: WorkspaceProfile, range: ClosedRange<Date>, completion: @escaping (Result<Int, Error>) -> Void) {
+    private func loadTranscripts(profile: WorkspaceProfile, range: ClosedRange<Date>, triggerId: String, completion: @escaping (Result<Int, Error>) -> Void) {
         let peerIds = profile.includedPeerIds
             .map(PeerId.init)
             .filter { $0.namespace != Namespaces.Peer.SecretChat }
@@ -165,13 +165,14 @@ private final class WorkspaceAIInboxGenerator {
                 completion(.failure(WorkspaceAIInboxGenerationError.noMessages))
                 return
             }
-            self.submit(profile: profile, range: range, transcripts: transcripts, completion: completion)
+            self.submit(profile: profile, range: range, triggerId: triggerId, transcripts: transcripts, completion: completion)
         }))
     }
 
     private func submit(
         profile: WorkspaceProfile,
         range: ClosedRange<Date>,
+        triggerId: String,
         transcripts: [WorkspaceAIChatTranscript],
         completion: @escaping (Result<Int, Error>) -> Void
     ) {
@@ -231,7 +232,7 @@ private final class WorkspaceAIInboxGenerator {
                         state.insights.append(contentsOf: insights)
                         state.generationRecords.append(WorkspaceAIGenerationRecord(
                             profileId: profile.id,
-                            triggerId: "manual",
+                            triggerId: triggerId,
                             completedAt: Date(),
                             rangeStart: range.lowerBound,
                             rangeEnd: range.upperBound,
@@ -313,6 +314,112 @@ private final class WorkspaceAIInboxGenerator {
             coordinator.cancel(jobId)
         }
         disposable.dispose()
+    }
+}
+
+private final class WorkspaceAIAutomationManager {
+    private let context: AccountContext
+    private let store: WorkspaceProfileStore
+    private let generator: WorkspaceAIInboxGenerator
+    private let disposable = MetaDisposable()
+    private var timer: DispatchSourceTimer?
+    private var latestProfileState: WorkspaceProfileState
+    private var latestAIState: WorkspaceAIPersistedState = .defaultValue
+    private var openedProfiles = Set<String>()
+    private var running = false
+    private var retryAfter = Date.distantPast
+
+    init(context: AccountContext) {
+        self.context = context
+        self.store = WorkspaceProfileStore.shared(accountId: context.account.id.int64)
+        self.generator = WorkspaceAIInboxGenerator(context: context)
+        self.latestProfileState = store.current
+        disposable.set((combineLatest(store.signal, workspaceAIState(postbox: context.account.postbox)) |> deliverOnMainQueue).start(next: { [weak self] profileState, aiState in
+            guard let self else { return }
+            self.latestProfileState = profileState
+            self.latestAIState = aiState
+            self.evaluate(now: Date())
+        }))
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 15, repeating: 60)
+        timer.setEventHandler { [weak self] in self?.evaluate(now: Date()) }
+        timer.resume()
+        self.timer = timer
+    }
+
+    private func evaluate(now: Date) {
+        let profile = latestProfileState.activeProfile
+        let badgeCount = latestAIState.insights.filter { $0.profileId == profile.id && !$0.isReviewed }.count
+            + latestAIState.followUps.filter { $0.profileId == profile.id && ($0.status == .open || $0.status == .snoozed) }.count
+        store.updateAIInboxBadgeCount(badgeCount)
+
+        guard !running, now >= retryAfter,
+              profile.isEnabled(.chatSummaries),
+              profile.includedPeerIds.contains(where: { PeerId($0).namespace != Namespaces.Peer.SecretChat }) else {
+            return
+        }
+        if profile.aiWorkflow.generateOnOpen, !openedProfiles.contains(profile.id) {
+            run(profile: profile, triggerId: "on-open", window: profile.aiWorkflow.automaticRollingWindow, now: now)
+            return
+        }
+        if profile.aiWorkflow.backgroundEnabled {
+            let lastBackground = latestAIState.generationRecords.first(where: { $0.profileId == profile.id && $0.triggerId == "background" })?.completedAt ?? .distantPast
+            if now.timeIntervalSince(lastBackground) >= TimeInterval(profile.aiWorkflow.backgroundIntervalMinutes * 60) {
+                run(profile: profile, triggerId: "background", window: profile.aiWorkflow.automaticRollingWindow, now: now)
+                return
+            }
+        }
+        let calendar = Calendar.current
+        let weekday = calendar.component(.weekday, from: now)
+        let minute = calendar.component(.hour, from: now) * 60 + calendar.component(.minute, from: now)
+        let startOfToday = calendar.startOfDay(for: now)
+        for trigger in profile.aiWorkflow.scheduledTriggers where trigger.weekdays.contains(weekday) && minute >= trigger.minutesFromMidnight {
+            let triggerId = "schedule.\(trigger.id)"
+            let last = latestAIState.generationRecords.first(where: { $0.profileId == profile.id && $0.triggerId == triggerId })?.completedAt ?? .distantPast
+            if last < startOfToday {
+                run(profile: profile, triggerId: triggerId, window: trigger.rollingWindow, now: now)
+                return
+            }
+        }
+    }
+
+    private func run(profile: WorkspaceProfile, triggerId: String, window: WorkspaceAIRollingWindow, now: Date) {
+        running = true
+        let from = now.addingTimeInterval(-TimeInterval(window.rawValue * 60 * 60))
+        generator.generate(profile: profile, range: from ... now, triggerId: triggerId, completion: { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.running = false
+                switch result {
+                case .success:
+                    self.retryAfter = .distantPast
+                    if triggerId == "on-open" {
+                        self.openedProfiles.insert(profile.id)
+                    }
+                case .failure:
+                    self.retryAfter = Date().addingTimeInterval(5 * 60)
+                }
+            }
+        })
+    }
+
+    deinit {
+        timer?.cancel()
+        disposable.dispose()
+    }
+}
+
+final class WorkspaceAIAutomationManagerRegistry {
+    static let shared = WorkspaceAIAutomationManagerRegistry()
+    private let lock = NSLock()
+    private var managers: [Int64: WorkspaceAIAutomationManager] = [:]
+
+    func start(context: AccountContext) {
+        let accountId = context.account.id.int64
+        lock.lock()
+        defer { lock.unlock() }
+        guard managers[accountId] == nil else { return }
+        managers[accountId] = WorkspaceAIAutomationManager(context: context)
     }
 }
 

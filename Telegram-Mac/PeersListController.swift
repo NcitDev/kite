@@ -2225,6 +2225,7 @@ class PeersListController: TelegramGenericViewController<PeerListContainerView>,
         }
         if mode.isPlain {
             let workspaceProfiles = WorkspaceProfileStore.shared(accountId: context.account.id.int64)
+            WorkspaceAIAutomationManagerRegistry.shared.start(context: context)
             self.storyList = combineLatest(
                 context.engine.messages.storySubscriptions(isHidden: isContacts || mode.groupId == .archive),
                 workspaceProfiles.signal

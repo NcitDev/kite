@@ -326,6 +326,7 @@ final class WorkspaceProfileStore {
     private let storageKey: String
     private let value: Atomic<WorkspaceProfileState>
     private let promise: ValuePromise<WorkspaceProfileState>
+    private let aiInboxBadgeCount = Atomic<Int>(value: 0)
 
     private init(accountId: Int64) {
         self.storageKey = "workspace-profiles.v1.\(accountId)"
@@ -419,6 +420,18 @@ final class WorkspaceProfileStore {
         }
     }
 
+    func updateAIInboxBadgeCount(_ count: Int) {
+        let normalized = min(max(count, 0), 99)
+        var changed = false
+        _ = aiInboxBadgeCount.modify { current in
+            changed = current != normalized
+            return normalized
+        }
+        if changed {
+            promise.set(current)
+        }
+    }
+
     func addObsidianIntegration() {
         updateActive { profile in
             profile.knowledgeIntegrations.append(.obsidian())
@@ -464,6 +477,7 @@ final class WorkspaceProfileStore {
 
     func aiInboxFilter(for profile: WorkspaceProfile? = nil) -> ChatListFilter {
         let profile = profile ?? current.activeProfile
+        let badgeCount = aiInboxBadgeCount.with { $0 }
         var includePeers = ChatListFilterIncludePeers()
         includePeers.setPeers(profile.includedPeerIds.map(PeerId.init).filter { $0.namespace != Namespaces.Peer.SecretChat })
         let data = ChatListFilterData(
@@ -479,7 +493,7 @@ final class WorkspaceProfileStore {
         )
         return .filter(
             id: WorkspaceProfileStore.aiInboxFilterId,
-            title: ChatFolderTitle(text: "AI Inbox", entities: [], enableAnimations: true),
+            title: ChatFolderTitle(text: badgeCount == 0 ? "AI Inbox" : "AI Inbox \(badgeCount)", entities: [], enableAnimations: true),
             emoticon: "✨",
             data: data
         )
@@ -1135,6 +1149,7 @@ private let workspaceProfileNameId = InputDataIdentifier("workspace.profile.name
 private let workspaceACPExecutableId = InputDataIdentifier("workspace.acp.executable")
 private let workspaceACPArgumentsId = InputDataIdentifier("workspace.acp.arguments")
 private let workspaceACPDirectoryId = InputDataIdentifier("workspace.acp.directory")
+private let workspaceAIInstructionsId = InputDataIdentifier("workspace.ai.instructions")
 
 private func workspaceIntegrationPathId(_ integrationId: String) -> InputDataIdentifier {
     return InputDataIdentifier("workspace.integration.\(integrationId).path")
@@ -1234,6 +1249,83 @@ private func workspaceProfileEntries(
             index += 1
         }
     }
+
+    entries.append(.sectionId(sectionId, type: .normal))
+    sectionId += 1
+    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("AI WORKFLOW"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
+    index += 1
+    for preset in [WorkspaceAIWorkflowPreset.focused, .proactive, .scheduled] {
+        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.ai.preset.\(preset.rawValue)"), data: .init(
+            name: preset.title,
+            color: theme.colors.text,
+            type: .selectable(active.aiWorkflow.preset == preset),
+            viewType: .singleItem,
+            action: { store.updateActive { $0.aiWorkflow = .preset(preset) } }
+        )))
+        index += 1
+    }
+    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.ai.on-open"), data: .init(name: "Generate on App Open", color: theme.colors.text, type: .switchable(active.aiWorkflow.generateOnOpen), viewType: .singleItem, action: {
+        store.updateActive {
+            $0.aiWorkflow.generateOnOpen.toggle()
+            $0.aiWorkflow.preset = .custom
+        }
+    }, autoswitch: false)))
+    index += 1
+    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.ai.background"), data: .init(name: "Background While App Runs", color: theme.colors.text, type: .switchable(active.aiWorkflow.backgroundEnabled), viewType: .singleItem, action: {
+        store.updateActive {
+            $0.aiWorkflow.backgroundEnabled.toggle()
+            $0.aiWorkflow.preset = .custom
+        }
+    }, autoswitch: false)))
+    index += 1
+    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.ai.background.interval"), data: .init(name: "Background Interval", color: theme.colors.text, type: .nextContext("Every \(active.aiWorkflow.backgroundIntervalMinutes) min"), viewType: .singleItem, action: {
+        store.updateActive { profile in
+            let values = [15, 30, 60]
+            let current = values.firstIndex(of: profile.aiWorkflow.backgroundIntervalMinutes) ?? 0
+            profile.aiWorkflow.backgroundIntervalMinutes = values[(current + 1) % values.count]
+            profile.aiWorkflow.preset = .custom
+        }
+    })))
+    index += 1
+    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.ai.window"), data: .init(name: "Automatic Range", color: theme.colors.text, type: .nextContext(active.aiWorkflow.automaticRollingWindow.title), viewType: .singleItem, action: {
+        store.updateActive { profile in
+            let values = WorkspaceAIRollingWindow.allCases
+            let current = values.firstIndex(of: profile.aiWorkflow.automaticRollingWindow) ?? 0
+            profile.aiWorkflow.automaticRollingWindow = values[(current + 1) % values.count]
+            profile.aiWorkflow.preset = .custom
+        }
+    })))
+    index += 1
+    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.ai.max-chats"), data: .init(name: "Maximum Chats Per Run", color: theme.colors.text, type: .nextContext("\(active.aiWorkflow.maxChatsPerRun)"), viewType: .singleItem, action: {
+        store.updateActive { profile in
+            let values = [5, 10, 20, 50]
+            let current = values.firstIndex(of: profile.aiWorkflow.maxChatsPerRun) ?? 0
+            profile.aiWorkflow.maxChatsPerRun = values[(current + 1) % values.count]
+            profile.aiWorkflow.preset = .custom
+        }
+    })))
+    index += 1
+    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.ai.scheduled"), data: .init(name: "Scheduled Digests", color: theme.colors.text, type: .switchable(!active.aiWorkflow.scheduledTriggers.isEmpty), viewType: .singleItem, action: {
+        store.updateActive { profile in
+            if profile.aiWorkflow.scheduledTriggers.isEmpty {
+                profile.aiWorkflow.scheduledTriggers = WorkspaceAIWorkflowSettings.scheduled.scheduledTriggers
+            } else {
+                profile.aiWorkflow.scheduledTriggers = []
+            }
+            profile.aiWorkflow.preset = .custom
+        }
+    }, autoswitch: false)))
+    index += 1
+    for trigger in active.aiWorkflow.scheduledTriggers {
+        let hour = trigger.minutesFromMidnight / 60
+        let minute = trigger.minutesFromMidnight % 60
+        entries.append(.desc(sectionId: sectionId, index: index, text: .plain(String(format: "Weekdays at %02d:%02d · %@", hour, minute, trigger.rollingWindow.title)), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
+        index += 1
+    }
+    entries.append(.input(sectionId: sectionId, index: index, value: .string(active.aiWorkflow.profileInstructions), error: nil, identifier: workspaceAIInstructionsId, mode: .plain, data: .init(viewType: .singleItem), placeholder: nil, inputPlaceholder: "What the AI Inbox should prioritize", filter: { $0 }, limit: 4096))
+    index += 1
+    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Automatic ranges are rolling windows. Manual generation always uses the exact inclusive From and To dates you choose. Background work only runs while TelegramWork is open."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
+    index += 1
 
     entries.append(.sectionId(sectionId, type: .normal))
     sectionId += 1
@@ -1476,6 +1568,15 @@ func WorkspaceProfilesController(context: AccountContext) -> InputDataController
             }
             if let directory = data[workspaceACPDirectoryId]?.stringValue, !directory.isEmpty {
                 configuration.workingDirectory = directory
+            }
+        }
+        if let instructions = data[workspaceAIInstructionsId]?.stringValue {
+            store.updateActive { profile in
+                let trimmed = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+                if profile.aiWorkflow.profileInstructions != trimmed {
+                    profile.aiWorkflow.profileInstructions = trimmed
+                    profile.aiWorkflow.preset = .custom
+                }
             }
         }
         let currentIntegrations = store.current.activeProfile.knowledgeIntegrations

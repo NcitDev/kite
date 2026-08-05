@@ -6,6 +6,13 @@
 //  Copyright © 2019 Telegram. All rights reserved.
 //
 
+import Foundation
+
+/// This fork is distributed independently and must never replace itself with an
+/// upstream Telegram build. Keep update entry points compiled so upstream code
+/// remains easy to merge, but make every path a no-op.
+let telegramUpdatesEnabled = false
+
 #if !APP_STORE
 
 import Cocoa
@@ -86,6 +93,9 @@ private var driver:SUBasicUpdateDriver?
 private let host = SUHost(bundle: Bundle.main)
 
 func updateApplication(sharedContext: SharedAccountContext) {
+    guard telegramUpdatesEnabled else {
+        return
+    }
 
     
     let state = stateValue.with {$0.loadingState}
@@ -564,6 +574,9 @@ enum UpdaterSource : Equatable {
 
 
 private func resetUpdater() {
+    guard telegramUpdatesEnabled else {
+        return
+    }
     
     #if !GITHUB
         let update:()->Void = {
@@ -594,6 +607,9 @@ private func resetUpdater() {
 private var updaterSource: UpdaterSource? = nil
 
 func updater_resetWithUpdaterSource(_ source: UpdaterSource, force: Bool = true) {
+    guard telegramUpdatesEnabled else {
+        return
+    }
     let state = stateValue.with { $0 }
     switch state.loadingState {
     case .readyToInstall:
@@ -635,4 +651,3 @@ private func trySwitchUpdaterBetweenSources() {
 }
 
 #endif
-

@@ -202,6 +202,10 @@ final class UpdateTabController: GenericViewController<UpdateTabView> {
         
         genericView.set(background: theme.colors.grayForeground, for: .Normal)
         genericView.isHidden = true
+
+        guard telegramUpdatesEnabled else {
+            return
+        }
         
         #if APP_STORE
         

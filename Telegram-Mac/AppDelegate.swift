@@ -1095,7 +1095,8 @@ class AppDelegate: NSResponder, NSApplicationDelegate, NSUserNotificationCenterD
                                 execute(inapp: inApp(for: executeUrlAfterLogin.nsstring, context: context.context))
                             }
                             #if !APP_STORE
-                            networkDisposable.set((context.context.account.postbox.preferencesView(keys: [PreferencesKeys.networkSettings]) |> delay(5.0, queue: Queue.mainQueue()) |> deliverOnMainQueue).start(next: { settings in
+                            if telegramUpdatesEnabled {
+                                networkDisposable.set((context.context.account.postbox.preferencesView(keys: [PreferencesKeys.networkSettings]) |> delay(5.0, queue: Queue.mainQueue()) |> deliverOnMainQueue).start(next: { settings in
                                 let settings = settings.values[PreferencesKeys.networkSettings]?.get(NetworkSettings.self)
                                 
                                 let applicationUpdateUrlPrefix: String?
@@ -1115,7 +1116,8 @@ class AppDelegate: NSResponder, NSApplicationDelegate, NSUserNotificationCenterD
                                 updater_resetWithUpdaterSource(.external(context: context.context))
                                 #endif
                                 
-                            }))
+                                }))
+                            }
                             #endif
                             
                             if let url = AppDelegate.eventProcessed {
@@ -1161,7 +1163,8 @@ class AppDelegate: NSResponder, NSApplicationDelegate, NSUserNotificationCenterD
                                     showModal(with: context.modal, for: window, animated: presentAuthAnimated)
                                     
                                     #if !APP_STORE
-                                    networkDisposable.set((context.account.postbox.preferencesView(keys: [PreferencesKeys.networkSettings]) |> delay(5.0, queue: Queue.mainQueue()) |> deliverOnMainQueue).start(next: { settings in
+                                    if telegramUpdatesEnabled {
+                                        networkDisposable.set((context.account.postbox.preferencesView(keys: [PreferencesKeys.networkSettings]) |> delay(5.0, queue: Queue.mainQueue()) |> deliverOnMainQueue).start(next: { settings in
                                         let settings = settings.values[PreferencesKeys.networkSettings]?.get(NetworkSettings.self)
                                         
                                         let applicationUpdateUrlPrefix: String?
@@ -1185,7 +1188,8 @@ class AppDelegate: NSResponder, NSApplicationDelegate, NSUserNotificationCenterD
                                         updater_resetWithUpdaterSource(.external(context: self.contextValue?.context))
                                         #endif
                                         
-                                    }))
+                                        }))
+                                    }
                                     #endif
                                     
                                     
@@ -1288,6 +1292,9 @@ class AppDelegate: NSResponder, NSApplicationDelegate, NSUserNotificationCenterD
 
 
     @IBAction func checkForUpdates(_ sender: Any) {
+        guard telegramUpdatesEnabled else {
+            return
+        }
         #if !APP_STORE
             showModal(with: InputDataModalController(AppUpdateViewController()), for: window)
             #if STABLE
@@ -1304,14 +1311,20 @@ class AppDelegate: NSResponder, NSApplicationDelegate, NSUserNotificationCenterD
     
     override func awakeFromNib() {
         #if APP_STORE
-        if let menu = NSApp.mainMenu?.item(at: 0)?.submenu, let sparkleItem = menu.item(withTag: 1000) {
+        let shouldRemoveUpdateItem = true
+        #else
+        let shouldRemoveUpdateItem = !telegramUpdatesEnabled
+        #endif
+        if shouldRemoveUpdateItem, let menu = NSApp.mainMenu?.item(at: 0)?.submenu, let sparkleItem = menu.item(withTag: 1000) {
             menu.removeItem(sparkleItem)
         }
-        #endif
     }
     
     
     @objc func checkUpdates() {
+        guard telegramUpdatesEnabled else {
+            return
+        }
         #if !APP_STORE
         showModal(with: InputDataModalController(AppUpdateViewController()), for: window)
         #endif

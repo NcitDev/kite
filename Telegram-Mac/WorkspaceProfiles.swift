@@ -34,6 +34,10 @@ struct WorkspaceProfile: Codable, Equatable {
     func displays(folderId: Int32) -> Bool {
         return showsAllFolders || visibleFolderIds.contains(folderId)
     }
+
+    func isEnabled(_ feature: WorkspaceAIFeature) -> Bool {
+        return featureFlags[feature.rawValue] ?? false
+    }
 }
 
 extension WorkspaceProfile {
@@ -76,17 +80,115 @@ extension WorkspaceProfile {
     }
 }
 
+enum WorkspaceACPProvider: String, Codable, CaseIterable {
+    case codex
+    case claude
+    case custom
+
+    var title: String {
+        switch self {
+        case .codex:
+            return "Codex"
+        case .claude:
+            return "Claude"
+        case .custom:
+            return "Custom ACP Agent"
+        }
+    }
+
+    var defaultArguments: [String] {
+        switch self {
+        case .codex:
+            return ["npx", "-y", "@agentclientprotocol/codex-acp"]
+        case .claude:
+            return ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
+        case .custom:
+            return []
+        }
+    }
+}
+
 struct WorkspaceACPConfiguration: Codable, Equatable {
+    var provider: WorkspaceACPProvider
     var executable: String
     var arguments: [String]
     var workingDirectory: String
 
     static var defaultValue: WorkspaceACPConfiguration {
         return WorkspaceACPConfiguration(
+            provider: .codex,
             executable: "/usr/bin/env",
-            arguments: ["codex-acp"],
+            arguments: WorkspaceACPProvider.codex.defaultArguments,
             workingDirectory: NSHomeDirectory()
         )
+    }
+
+    mutating func selectProvider(_ provider: WorkspaceACPProvider) {
+        self.provider = provider
+        guard provider != .custom else {
+            return
+        }
+        self.executable = "/usr/bin/env"
+        self.arguments = provider.defaultArguments
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case provider
+        case executable
+        case arguments
+        case workingDirectory
+    }
+
+    init(provider: WorkspaceACPProvider, executable: String, arguments: [String], workingDirectory: String) {
+        self.provider = provider
+        self.executable = executable
+        self.arguments = arguments
+        self.workingDirectory = workingDirectory
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let executable = try container.decode(String.self, forKey: .executable)
+        var arguments = try container.decode([String].self, forKey: .arguments)
+        let inferredProvider: WorkspaceACPProvider
+        if arguments.contains(where: { $0.contains("claude") }) {
+            inferredProvider = .claude
+        } else if arguments.contains(where: { $0.contains("codex") }) {
+            inferredProvider = .codex
+        } else {
+            inferredProvider = .custom
+        }
+        let provider = try container.decodeIfPresent(WorkspaceACPProvider.self, forKey: .provider) ?? inferredProvider
+        if executable == "/usr/bin/env", arguments == ["codex-acp"] {
+            arguments = WorkspaceACPProvider.codex.defaultArguments
+        }
+        self.init(
+            provider: provider,
+            executable: executable,
+            arguments: arguments,
+            workingDirectory: try container.decode(String.self, forKey: .workingDirectory)
+        )
+    }
+}
+
+enum WorkspaceAIFeature: String, CaseIterable {
+    case chatSummaries = "ai.chat-summaries"
+    case replyDrafts = "ai.reply-drafts"
+    case scheduledMessages = "ai.scheduled-messages"
+
+    var title: String {
+        switch self {
+        case .chatSummaries:
+            return "Chat Summaries"
+        case .replyDrafts:
+            return "Reply Drafts"
+        case .scheduledMessages:
+            return "Scheduled Messages"
+        }
+    }
+
+    var isWriteCapability: Bool {
+        return self == .scheduledMessages
     }
 }
 
@@ -120,7 +222,7 @@ struct WorkspaceProfileState: Codable, Equatable {
             featureFlags: [:]
         )
         return WorkspaceProfileState(
-            schemaVersion: 1,
+            schemaVersion: 2,
             activeProfileId: work.id,
             profiles: [work, home],
             acp: .defaultValue
@@ -297,6 +399,7 @@ enum WorkspaceACPStatus: Equatable {
     case disconnected
     case connecting
     case connected(agentName: String)
+    case authenticationRequired(agentName: String, methods: [WorkspaceACPAuthMethod])
     case failed(String)
 
     var title: String {
@@ -307,11 +410,31 @@ enum WorkspaceACPStatus: Equatable {
             return "Connecting…"
         case let .connected(agentName):
             return "Connected: \(agentName)"
+        case let .authenticationRequired(agentName, _):
+            return "Sign in to \(agentName)"
         case let .failed(message):
             return "Failed: \(message)"
         }
     }
 }
+
+struct WorkspaceACPAuthMethod: Equatable {
+    let id: String
+    let name: String
+    let description: String?
+}
+
+struct WorkspaceACPPermissionOption {
+    let id: String
+    let name: String
+    let kind: String
+}
+
+typealias WorkspaceACPPermissionHandler = (
+    _ title: String,
+    _ options: [WorkspaceACPPermissionOption],
+    _ completion: @escaping (String?) -> Void
+) -> Void
 
 struct WorkspaceACPEvent {
     let sessionId: String
@@ -334,6 +457,10 @@ final class WorkspaceACPClient {
     private var pending: [Int: ([String: Any]) -> Void] = [:]
     private var handlers: [WorkspaceACPRequestHandler] = []
     private var sessionId: String?
+    private var configuration: WorkspaceACPConfiguration?
+    private var agentName: String?
+    private var authenticationMethods: [WorkspaceACPAuthMethod] = []
+    private var permissionHandler: WorkspaceACPPermissionHandler?
 
     var status: Signal<WorkspaceACPStatus, NoError> {
         return statusPromise.get()
@@ -351,9 +478,36 @@ final class WorkspaceACPClient {
         }
     }
 
-    func connect(configuration: WorkspaceACPConfiguration) {
+    func connect(
+        configuration: WorkspaceACPConfiguration,
+        enabledFeatures: [WorkspaceAIFeature],
+        permissionHandler: @escaping WorkspaceACPPermissionHandler
+    ) {
         queue.async { [weak self] in
-            self?.connectOnQueue(configuration: configuration)
+            self?.connectOnQueue(
+                configuration: configuration,
+                enabledFeatures: enabledFeatures,
+                permissionHandler: permissionHandler
+            )
+        }
+    }
+
+    func authenticate(methodId: String) {
+        queue.async { [weak self] in
+            guard let self,
+                  self.process != nil,
+                  self.authenticationMethods.contains(where: { $0.id == methodId }) else {
+                return
+            }
+            self.statusPromise.set(.connecting)
+            self.sendRequest(method: "authenticate", params: ["methodId": methodId]) { [weak self] response in
+                guard let self else { return }
+                if let error = response["error"] as? [String: Any] {
+                    self.stopOnQueue(status: .failed(error["message"] as? String ?? "ACP authentication failed"))
+                } else {
+                    self.createSessionOnQueue()
+                }
+            }
         }
     }
 
@@ -389,9 +543,18 @@ final class WorkspaceACPClient {
         }
     }
 
-    private func connectOnQueue(configuration: WorkspaceACPConfiguration) {
+    private func connectOnQueue(
+        configuration: WorkspaceACPConfiguration,
+        enabledFeatures: [WorkspaceAIFeature],
+        permissionHandler: @escaping WorkspaceACPPermissionHandler
+    ) {
         stopOnQueue(status: .connecting)
         statusPromise.set(.connecting)
+
+        guard FileManager.default.fileExists(atPath: configuration.workingDirectory) else {
+            statusPromise.set(.failed("Working directory does not exist"))
+            return
+        }
 
         let process = Process()
         let inputPipe = Pipe()
@@ -427,12 +590,24 @@ final class WorkspaceACPClient {
             try process.run()
             self.process = process
             self.input = inputPipe.fileHandleForWriting
+            self.configuration = configuration
+            self.permissionHandler = permissionHandler
             sendRequest(method: "initialize", params: [
                 "protocolVersion": 1,
-                "clientCapabilities": [:],
+                "clientCapabilities": [
+                    "_meta": [
+                        "dev.telegramwork/aiFeatures": enabledFeatures.map { feature in
+                            [
+                                "id": feature.rawValue,
+                                "title": feature.title,
+                                "access": feature.isWriteCapability ? "write" : "read"
+                            ]
+                        }
+                    ]
+                ],
                 "clientInfo": [
-                    "name": "telegram-mac",
-                    "title": "Telegram for macOS",
+                    "name": "telegramwork-mac",
+                    "title": "TelegramWork for macOS",
                     "version": APP_VERSION_STRING
                 ]
             ]) { [weak self] response in
@@ -442,27 +617,57 @@ final class WorkspaceACPClient {
                     return
                 }
                 let result = response["result"] as? [String: Any]
-                let info = result?["agentInfo"] as? [String: Any]
-                let name = (info?["title"] as? String) ?? (info?["name"] as? String) ?? "Codex"
-                self.sendRequest(method: "session/new", params: [
-                    "cwd": configuration.workingDirectory,
-                    "mcpServers": []
-                ]) { [weak self] response in
-                    guard let self else { return }
-                    if let error = response["error"] as? [String: Any] {
-                        self.stopOnQueue(status: .failed(error["message"] as? String ?? "ACP session creation failed"))
-                        return
-                    }
-                    guard let result = response["result"] as? [String: Any], let sessionId = result["sessionId"] as? String else {
-                        self.stopOnQueue(status: .failed("ACP agent returned no session ID"))
-                        return
-                    }
-                    self.sessionId = sessionId
-                    self.statusPromise.set(.connected(agentName: name))
+                guard let protocolVersion = result?["protocolVersion"] as? Int, protocolVersion == 1 else {
+                    self.stopOnQueue(status: .failed("Agent does not support ACP v1"))
+                    return
                 }
+                let info = result?["agentInfo"] as? [String: Any]
+                self.agentName = (info?["title"] as? String) ?? (info?["name"] as? String) ?? configuration.provider.title
+                self.authenticationMethods = (result?["authMethods"] as? [[String: Any]] ?? []).compactMap { method in
+                    guard let id = method["id"] as? String else { return nil }
+                    return WorkspaceACPAuthMethod(
+                        id: id,
+                        name: (method["name"] as? String) ?? id,
+                        description: method["description"] as? String
+                    )
+                }
+                self.createSessionOnQueue()
             }
         } catch {
             stopOnQueue(status: .failed(error.localizedDescription))
+        }
+    }
+
+    private func createSessionOnQueue() {
+        guard let configuration else {
+            stopOnQueue(status: .failed("ACP configuration is missing"))
+            return
+        }
+        sendRequest(method: "session/new", params: [
+            "cwd": configuration.workingDirectory,
+            "mcpServers": []
+        ]) { [weak self] response in
+            guard let self else { return }
+            if let error = response["error"] as? [String: Any] {
+                let message = error["message"] as? String ?? "ACP session creation failed"
+                let normalizedMessage = message.lowercased()
+                if !self.authenticationMethods.isEmpty,
+                   (normalizedMessage.contains("auth") || normalizedMessage.contains("login") || normalizedMessage.contains("sign in")) {
+                    self.statusPromise.set(.authenticationRequired(
+                        agentName: self.agentName ?? configuration.provider.title,
+                        methods: self.authenticationMethods
+                    ))
+                } else {
+                    self.stopOnQueue(status: .failed(message))
+                }
+                return
+            }
+            guard let result = response["result"] as? [String: Any], let sessionId = result["sessionId"] as? String else {
+                self.stopOnQueue(status: .failed("ACP agent returned no session ID"))
+                return
+            }
+            self.sessionId = sessionId
+            self.statusPromise.set(.connected(agentName: self.agentName ?? configuration.provider.title))
         }
     }
 
@@ -472,6 +677,10 @@ final class WorkspaceACPClient {
         input = nil
         pending.removeAll()
         sessionId = nil
+        configuration = nil
+        agentName = nil
+        authenticationMethods = []
+        permissionHandler = nil
         outputBuffer.removeAll(keepingCapacity: false)
         current?.standardOutput.flatMap { ($0 as? Pipe)?.fileHandleForReading.readabilityHandler = nil }
         current?.standardError.flatMap { ($0 as? Pipe)?.fileHandleForReading.readabilityHandler = nil }
@@ -526,6 +735,33 @@ final class WorkspaceACPClient {
         guard let id = object["id"] as? Int else {
             return
         }
+        if method == "session/request_permission", let params {
+            let toolCall = params["toolCall"] as? [String: Any]
+            let title = (toolCall?["title"] as? String) ?? "The AI agent wants to use a tool."
+            let options = (params["options"] as? [[String: Any]] ?? []).compactMap { option -> WorkspaceACPPermissionOption? in
+                guard let optionId = option["optionId"] as? String,
+                      let name = option["name"] as? String,
+                      let kind = option["kind"] as? String else {
+                    return nil
+                }
+                return WorkspaceACPPermissionOption(id: optionId, name: name, kind: kind)
+            }
+            guard let permissionHandler else {
+                write(["jsonrpc": "2.0", "id": id, "result": ["outcome": ["outcome": "cancelled"]]])
+                return
+            }
+            permissionHandler(title, options) { [weak self] optionId in
+                self?.queue.async {
+                    guard let self else { return }
+                    if let optionId {
+                        self.write(["jsonrpc": "2.0", "id": id, "result": ["outcome": ["outcome": "selected", "optionId": optionId]]])
+                    } else {
+                        self.write(["jsonrpc": "2.0", "id": id, "result": ["outcome": ["outcome": "cancelled"]]])
+                    }
+                }
+            }
+            return
+        }
         for handler in handlers where handler.handleACPRequest(method: method, params: params, completion: { [weak self] result in
             self?.queue.async {
                 switch result {
@@ -549,7 +785,7 @@ private enum WorkspaceACPClientError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notConnected:
-            return "Codex ACP is not connected"
+            return "ACP agent is not connected"
         case let .remote(message):
             return message
         }
@@ -596,6 +832,7 @@ enum WorkspaceMessageScheduler {
 
 private let workspaceProfileNameId = InputDataIdentifier("workspace.profile.name")
 private let workspaceACPExecutableId = InputDataIdentifier("workspace.acp.executable")
+private let workspaceACPArgumentsId = InputDataIdentifier("workspace.acp.arguments")
 private let workspaceACPDirectoryId = InputDataIdentifier("workspace.acp.directory")
 
 private func workspaceProfileEntries(
@@ -691,28 +928,97 @@ private func workspaceProfileEntries(
 
     entries.append(.sectionId(sectionId, type: .normal))
     sectionId += 1
-    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("CODEX ACP"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
+    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("AI FEATURES"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
     index += 1
+    for feature in WorkspaceAIFeature.allCases {
+        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.\(feature.rawValue)"), data: .init(
+            name: feature.title,
+            color: theme.colors.text,
+            type: .switchable(active.isEnabled(feature)),
+            viewType: .singleItem,
+            action: {
+                store.updateActive { profile in
+                    profile.featureFlags[feature.rawValue] = !profile.isEnabled(feature)
+                }
+            },
+            autoswitch: false
+        )))
+        index += 1
+    }
+    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Profile-scoped capabilities advertised to connected AI agents. Read and write integrations must still be registered explicitly; enabling a capability never sends chat data by itself."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
+    index += 1
+
+    entries.append(.sectionId(sectionId, type: .normal))
+    sectionId += 1
+    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("AI AGENT · AGENT CLIENT PROTOCOL"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
+    index += 1
+    for provider in WorkspaceACPProvider.allCases {
+        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.acp.provider.\(provider.rawValue)"), data: .init(
+            name: provider.title,
+            color: theme.colors.text,
+            type: .selectable(provider == state.acp.provider),
+            viewType: .singleItem,
+            action: {
+                client.disconnect()
+                store.updateACP { $0.selectProvider(provider) }
+            }
+        )))
+        index += 1
+    }
     entries.append(.input(sectionId: sectionId, index: index, value: .string(state.acp.executable), error: nil, identifier: workspaceACPExecutableId, mode: .plain, data: .init(viewType: .firstItem), placeholder: nil, inputPlaceholder: "ACP executable", filter: { $0 }, limit: 1024))
+    index += 1
+    entries.append(.input(sectionId: sectionId, index: index, value: .string(state.acp.arguments.joined(separator: " ")), error: nil, identifier: workspaceACPArgumentsId, mode: .plain, data: .init(viewType: .innerItem), placeholder: nil, inputPlaceholder: "Arguments", filter: { $0 }, limit: 2048))
     index += 1
     entries.append(.input(sectionId: sectionId, index: index, value: .string(state.acp.workingDirectory), error: nil, identifier: workspaceACPDirectoryId, mode: .plain, data: .init(viewType: .lastItem), placeholder: nil, inputPlaceholder: "Working directory", filter: { $0 }, limit: 2048))
     index += 1
     let isConnected: Bool
     switch acpStatus {
-    case .connected, .connecting:
+    case .connected, .connecting, .authenticationRequired:
         isConnected = true
     default:
         isConnected = false
     }
-    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.acp.connect"), data: .init(name: isConnected ? "Disconnect Codex" : "Connect to Codex", color: theme.colors.accent, type: .nextContext(acpStatus.title), viewType: .singleItem, action: {
+    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.acp.connect"), data: .init(name: isConnected ? "Disconnect Agent" : "Connect to \(state.acp.provider.title)", color: theme.colors.accent, type: .nextContext(acpStatus.title), viewType: .singleItem, action: {
         if isConnected {
             client.disconnect()
         } else {
-            client.connect(configuration: store.current.acp)
+            let current = store.current
+            let features = WorkspaceAIFeature.allCases.filter { current.activeProfile.isEnabled($0) }
+            client.connect(configuration: current.acp, enabledFeatures: features, permissionHandler: { title, options, completion in
+                DispatchQueue.main.async {
+                    guard let allow = options.first(where: { $0.kind == "allow_once" }) ?? options.first(where: { $0.kind == "allow_always" }) else {
+                        completion(options.first(where: { $0.kind == "reject_once" || $0.kind == "reject_always" })?.id)
+                        return
+                    }
+                    let reject = options.first(where: { $0.kind == "reject_once" }) ?? options.first(where: { $0.kind == "reject_always" })
+                    verifyAlert_button(
+                        for: context.window,
+                        header: "AI Agent Permission",
+                        information: title,
+                        ok: allow.name,
+                        cancel: reject?.name ?? strings().modalCancel,
+                        successHandler: { _ in completion(allow.id) },
+                        cancelHandler: { completion(reject?.id) }
+                    )
+                }
+            })
         }
     })))
     index += 1
-    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Uses ACP v1 over stdio. The default launches the codex-acp adapter. New Telegram chat, response, and task capabilities can be added through WorkspaceACPRequestHandler."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
+    if case let .authenticationRequired(_, methods) = acpStatus {
+        for method in methods {
+            entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.acp.auth.\(method.id)"), data: .init(name: "Sign in with \(method.name)", color: theme.colors.accent, type: .none, viewType: .singleItem, action: {
+                client.authenticate(methodId: method.id)
+            })))
+            index += 1
+            if let description = method.description {
+                entries.append(.desc(sectionId: sectionId, index: index, text: .plain(description), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
+                index += 1
+            }
+        }
+    }
+    let command = ([state.acp.executable] + state.acp.arguments).joined(separator: " ")
+    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Uses Agent Client Protocol v1 over stdio. Command: \(command). Telegram capabilities are extension points for WorkspaceACPRequestHandler implementations."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
     index += 1
 
     entries.append(.sectionId(sectionId, type: .normal))
@@ -745,6 +1051,9 @@ func WorkspaceProfilesController(context: AccountContext) -> InputDataController
         store.updateACP { configuration in
             if let executable = data[workspaceACPExecutableId]?.stringValue, !executable.isEmpty {
                 configuration.executable = executable
+            }
+            if let arguments = data[workspaceACPArgumentsId]?.stringValue {
+                configuration.arguments = arguments.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
             }
             if let directory = data[workspaceACPDirectoryId]?.stringValue, !directory.isEmpty {
                 configuration.workingDirectory = directory

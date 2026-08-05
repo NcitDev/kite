@@ -1113,6 +1113,24 @@ enum WorkspaceMessageScheduler {
     }
 }
 
+enum WorkspaceMessageSender {
+    static func send(context: AccountContext, peerId: PeerId, text: String) -> Signal<[MessageId?], NoError> {
+        let message = EnqueueMessage.message(
+            text: text,
+            attributes: [],
+            inlineStickers: [:],
+            mediaReference: nil,
+            threadId: nil,
+            replyToMessageId: nil,
+            replyToStoryId: nil,
+            localGroupingKey: nil,
+            correlationId: nil,
+            bubbleUpEmojiOrStickersets: []
+        )
+        return enqueueMessages(account: context.account, peerId: peerId, messages: [message])
+    }
+}
+
 private let workspaceProfileNameId = InputDataIdentifier("workspace.profile.name")
 private let workspaceACPExecutableId = InputDataIdentifier("workspace.acp.executable")
 private let workspaceACPArgumentsId = InputDataIdentifier("workspace.acp.arguments")
@@ -1237,6 +1255,46 @@ private func workspaceProfileEntries(
         index += 1
     }
     entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Profile-scoped capabilities advertised to connected AI agents. Read and write integrations must still be registered explicitly; enabling a capability never sends chat data by itself."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
+    index += 1
+
+    entries.append(.sectionId(sectionId, type: .normal))
+    sectionId += 1
+    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("AI ACTION APPROVALS"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
+    index += 1
+    for capability in WorkspaceAICapability.allCases {
+        let decision = active.approval(for: capability)
+        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.approval.\(capability.rawValue)"), data: .init(
+            name: capability.title,
+            color: theme.colors.text,
+            type: .nextContext(decision.title),
+            viewType: .singleItem,
+            action: {
+                store.updateActive { profile in
+                    switch profile.approval(for: capability) {
+                    case .ask:
+                        profile.aiApprovals[capability.rawValue] = .allowAlways
+                    case .allowAlways:
+                        profile.aiApprovals[capability.rawValue] = .neverAllow
+                    case .neverAllow:
+                        profile.aiApprovals[capability.rawValue] = .ask
+                    }
+                }
+            }
+        )))
+        index += 1
+    }
+    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.follow-up.macos-alerts"), data: .init(
+        name: "macOS Follow-up Alerts",
+        color: theme.colors.text,
+        type: .switchable(active.aiWorkflow.macOSNotificationsEnabled),
+        viewType: .singleItem,
+        action: {
+            store.updateActive { $0.aiWorkflow.macOSNotificationsEnabled.toggle() }
+        },
+        autoswitch: false
+    )))
+    index += 1
+    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Click a capability to cycle Ask Every Time → Always Allow → Never Allow. Sending and scheduling always show the proposed text in the approval warning unless this profile explicitly remembers permission."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
     index += 1
 
     entries.append(.sectionId(sectionId, type: .normal))

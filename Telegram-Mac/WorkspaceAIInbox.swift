@@ -10,6 +10,7 @@ import Postbox
 import SwiftSignalKit
 import TelegramCore
 import TGUIKit
+import UserNotifications
 
 private struct WorkspaceAIInboxLocalState: Equatable {
     var isGenerating = false
@@ -40,6 +41,60 @@ private enum WorkspaceAIInboxGenerationError: LocalizedError {
         case .invalidResponse:
             return "The AI agent returned a response that could not be used for the inbox."
         }
+    }
+}
+
+private enum WorkspaceAIFollowUpNotifications {
+    static func synchronize(_ followUp: WorkspaceFollowUp, profile: WorkspaceProfile) {
+        let center = UNUserNotificationCenter.current()
+        center.removePendingNotificationRequests(withIdentifiers: [followUp.id])
+        guard profile.aiWorkflow.macOSNotificationsEnabled,
+              followUp.status == .open || followUp.status == .snoozed,
+              let dueAt = followUp.snoozedUntil ?? followUp.dueAt,
+              dueAt > Date() else {
+            return
+        }
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "TelegramWork follow-up"
+            content.body = followUp.title
+            content.sound = .default
+            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: max(1, dueAt.timeIntervalSinceNow), repeats: false)
+            center.add(UNNotificationRequest(identifier: followUp.id, content: content, trigger: trigger))
+        }
+    }
+}
+
+private func workspaceAIPerformApproved(
+    context: AccountContext,
+    store: WorkspaceProfileStore,
+    capability: WorkspaceAICapability,
+    detail: String,
+    action: @escaping () -> Void
+) {
+    let profile = store.current.activeProfile
+    switch profile.approval(for: capability) {
+    case .allowAlways:
+        action()
+    case .neverAllow:
+        alert(for: context.window, header: "AI Action Blocked", info: "\(capability.title) is set to Never Allow for the \(profile.name) profile. Change it in Profiles & Automation.")
+    case .ask:
+        verifyAlert(
+            for: context.window,
+            header: "Allow \(capability.title)?",
+            information: detail,
+            ok: "Allow Once",
+            cancel: strings().modalCancel,
+            option: "Always allow for \(profile.name)",
+            optionIsSelected: false,
+            successHandler: { result in
+                if result == .thrid {
+                    store.updateActive { $0.aiApprovals[capability.rawValue] = .allowAlways }
+                }
+                action()
+            }
+        )
     }
 }
 
@@ -337,7 +392,11 @@ private func workspaceAIInboxEntries(
     openRange: @escaping () -> Void,
     openSettings: @escaping () -> Void,
     openInsight: @escaping (WorkspaceAIInsight, WorkspaceAIMessageReference?) -> Void,
-    useSuggestion: @escaping (WorkspaceAIInsight, WorkspaceAISuggestion) -> Void
+    useSuggestion: @escaping (WorkspaceAIInsight, WorkspaceAISuggestion) -> Void,
+    sendSuggestion: @escaping (WorkspaceAIInsight, WorkspaceAISuggestion) -> Void,
+    scheduleSuggestion: @escaping (WorkspaceAIInsight, WorkspaceAISuggestion) -> Void,
+    markReviewed: @escaping (WorkspaceAIInsight) -> Void,
+    updateFollowUp: @escaping (WorkspaceFollowUp, WorkspaceFollowUpStatus) -> Void
 ) -> [InputDataEntry] {
     var entries: [InputDataEntry] = []
     var sectionId: Int32 = 0
@@ -397,6 +456,24 @@ private func workspaceAIInboxEntries(
             )))
             index += 1
         }
+        if let reply = insight.suggestions.first(where: { $0.proposedText?.isEmpty == false }) {
+            entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: .init("workspace.ai-inbox.send.\(reply.id)"), data: .init(
+                name: "Send proposed reply…",
+                color: theme.colors.redUI,
+                type: .next,
+                viewType: .singleItem,
+                action: { sendSuggestion(insight, reply) }
+            )))
+            index += 1
+            entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: .init("workspace.ai-inbox.schedule.\(reply.id)"), data: .init(
+                name: "Schedule proposed reply…",
+                color: theme.colors.accent,
+                type: .next,
+                viewType: .singleItem,
+                action: { scheduleSuggestion(insight, reply) }
+            )))
+            index += 1
+        }
         for (sourceIndex, source) in insight.sourceMessages.prefix(3).enumerated() {
             entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: .init("workspace.ai-inbox.source.\(insight.id).\(sourceIndex)"), data: .init(
                 name: "Open source message \(sourceIndex + 1)",
@@ -411,8 +488,51 @@ private func workspaceAIInboxEntries(
             entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Notes: \(insight.noteCitations.joined(separator: ", "))"), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
             index += 1
         }
+        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: .init("workspace.ai-inbox.reviewed.\(insight.id)"), data: .init(
+            name: insight.isReviewed ? "Mark as Unreviewed" : "Mark as Reviewed",
+            color: theme.colors.text,
+            type: .switchable(insight.isReviewed),
+            viewType: .singleItem,
+            action: { markReviewed(insight) },
+            autoswitch: false
+        )))
+        index += 1
         entries.append(.sectionId(sectionId, type: .normal))
         sectionId += 1
+    }
+
+    let followUps = persisted.followUps.filter { $0.profileId == profile.id && ($0.status == .open || $0.status == .snoozed) }.sorted {
+        ($0.snoozedUntil ?? $0.dueAt ?? .distantFuture) < ($1.snoozedUntil ?? $1.dueAt ?? .distantFuture)
+    }
+    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("FOLLOW-UP QUEUE"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
+    index += 1
+    if followUps.isEmpty {
+        entries.append(.desc(sectionId: sectionId, index: index, text: .plain("No open follow-ups. AI suggestions can create local reminders after approval."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
+        index += 1
+    }
+    let dueFormatter = DateFormatter()
+    dueFormatter.dateStyle = .medium
+    dueFormatter.timeStyle = .short
+    for followUp in followUps {
+        let due = followUp.snoozedUntil ?? followUp.dueAt
+        let dueText = due.map { date in
+            date <= Date() ? "Overdue · \(dueFormatter.string(from: date))" : dueFormatter.string(from: date)
+        } ?? "No due date"
+        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: .init("workspace.ai-inbox.follow-up.\(followUp.id)"), data: .init(
+            name: followUp.title,
+            color: due.map { $0 <= Date() } == true ? theme.colors.redUI : theme.colors.text,
+            type: .nextContext(dueText),
+            viewType: .firstItem,
+            action: {
+                let insight = WorkspaceAIInsight(id: "follow-up", profileId: followUp.profileId, peerId: followUp.peerId, rangeStart: followUp.createdAt, rangeEnd: followUp.updatedAt, generatedAt: followUp.updatedAt, sourceWatermark: nil, attentionLevel: .action, reason: followUp.notes, summary: followUp.title, suggestions: [], sourceMessages: followUp.sourceMessages, noteCitations: [], isReviewed: false)
+                openInsight(insight, followUp.sourceMessages.first)
+            }
+        )))
+        index += 1
+        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: .init("workspace.ai-inbox.follow-up.done.\(followUp.id)"), data: .init(name: "Complete", color: theme.colors.accent, type: .none, viewType: .innerItem, action: { updateFollowUp(followUp, .done) })))
+        index += 1
+        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: .init("workspace.ai-inbox.follow-up.snooze.\(followUp.id)"), data: .init(name: "Snooze for 1 Day", color: theme.colors.accent, type: .none, viewType: .lastItem, action: { updateFollowUp(followUp, .snoozed) })))
+        index += 1
     }
     return entries
 }
@@ -433,12 +553,112 @@ func WorkspaceAIInboxController(context: AccountContext) -> InputDataController 
         let focus = source.flatMap { ChatFocusTarget(messageId: MessageId(peerId: peerId, namespace: $0.namespace, id: $0.id)) }
         navigateToChat(navigation: context.bindings.rootNavigation(), context: context, chatLocation: .peer(peerId), focusTarget: focus)
     }
-    let useSuggestion: (WorkspaceAIInsight, WorkspaceAISuggestion) -> Void = { insight, suggestion in
+
+    let openSuggestionDraft: (WorkspaceAIInsight, WorkspaceAISuggestion) -> Void = { insight, suggestion in
         let peerId = PeerId(insight.peerId)
         let action = suggestion.proposedText.map { text in
             ChatInitialAction.inputText(text: .init(inputText: text), behavior: .automatic)
         }
         navigateToChat(navigation: context.bindings.rootNavigation(), context: context, chatLocation: .peer(peerId), initialAction: action)
+    }
+
+    let sendSuggestion: (WorkspaceAIInsight, WorkspaceAISuggestion) -> Void = { insight, suggestion in
+        guard let text = suggestion.proposedText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return }
+        workspaceAIPerformApproved(
+            context: context,
+            store: store,
+            capability: .sendMessage,
+            detail: "This sends immediately to \(localValue.with { $0.peerTitles[insight.peerId] ?? "the selected chat" }):\n\n\(text)",
+            action: {
+                peerDisposable.add(WorkspaceMessageSender.send(context: context, peerId: PeerId(insight.peerId), text: text).start(completed: {
+                    updateLocal { current in
+                        var current = current
+                        current.statusText = "Proposed reply sent."
+                        return current
+                    }
+                }))
+            }
+        )
+    }
+
+    let scheduleSuggestion: (WorkspaceAIInsight, WorkspaceAISuggestion) -> Void = { insight, suggestion in
+        guard let text = suggestion.proposedText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return }
+        let scheduleAt: (Date) -> Void = { date in
+            workspaceAIPerformApproved(
+                context: context,
+                store: store,
+                capability: .scheduleMessage,
+                detail: "This schedules the following Telegram message for \(DateSelectorUtil.formatDay(date)) at \(DateSelectorUtil.shortFormatTime(date)):\n\n\(text)",
+                action: {
+                    peerDisposable.add(WorkspaceMessageScheduler.schedule(context: context, peerId: PeerId(insight.peerId), text: text, at: date).start(completed: {
+                        updateLocal { current in
+                            var current = current
+                            current.statusText = "Proposed reply scheduled in Telegram."
+                            return current
+                        }
+                    }))
+                }
+            )
+        }
+        if let proposedDate = suggestion.proposedDate, proposedDate > Date() {
+            scheduleAt(proposedDate)
+        } else {
+            showModal(with: DateSelectorModalController(context: context, mode: .schedule(PeerId(insight.peerId)), selectedAt: scheduleAt), for: context.window)
+        }
+    }
+
+    let useSuggestion: (WorkspaceAIInsight, WorkspaceAISuggestion) -> Void = { insight, suggestion in
+        switch suggestion.kind {
+        case .createFollowUp:
+            workspaceAIPerformApproved(context: context, store: store, capability: .createFollowUp, detail: "Create a local follow-up named “\(suggestion.title)” for this profile?", action: {
+                let now = Date()
+                let followUp = WorkspaceFollowUp(
+                    id: UUID().uuidString,
+                    profileId: store.current.activeProfile.id,
+                    peerId: insight.peerId,
+                    title: suggestion.title,
+                    notes: suggestion.detail,
+                    owner: nil,
+                    dueAt: suggestion.proposedDate,
+                    snoozedUntil: nil,
+                    status: .open,
+                    sourceMessages: insight.sourceMessages,
+                    createdAt: now,
+                    updatedAt: now
+                )
+                peerDisposable.add(updateWorkspaceAIState(postbox: context.account.postbox, { $0.followUps.append(followUp) }).start(completed: {
+                    WorkspaceAIFollowUpNotifications.synchronize(followUp, profile: store.current.activeProfile)
+                }))
+            })
+        case .scheduleReply:
+            scheduleSuggestion(insight, suggestion)
+        case .draftReply, .reviewDecision, .findRelatedNotes:
+            openSuggestionDraft(insight, suggestion)
+        }
+    }
+
+    let markReviewed: (WorkspaceAIInsight) -> Void = { insight in
+        workspaceAIPerformApproved(context: context, store: store, capability: .markReviewed, detail: insight.isReviewed ? "Mark this AI Inbox card as unreviewed?" : "Mark this AI Inbox card as reviewed?", action: {
+            peerDisposable.add(updateWorkspaceAIState(postbox: context.account.postbox, { state in
+                guard let position = state.insights.firstIndex(where: { $0.id == insight.id }) else { return }
+                state.insights[position].isReviewed.toggle()
+            }).start())
+        })
+    }
+
+    let updateFollowUp: (WorkspaceFollowUp, WorkspaceFollowUpStatus) -> Void = { followUp, status in
+        workspaceAIPerformApproved(context: context, store: store, capability: .updateFollowUp, detail: status == .done ? "Complete the follow-up “\(followUp.title)”?" : "Snooze “\(followUp.title)” for one day?", action: {
+            var updated = followUp
+            updated.status = status
+            updated.snoozedUntil = status == .snoozed ? Date().addingTimeInterval(24 * 60 * 60) : nil
+            updated.updatedAt = Date()
+            peerDisposable.add(updateWorkspaceAIState(postbox: context.account.postbox, { state in
+                guard let position = state.followUps.firstIndex(where: { $0.id == followUp.id }) else { return }
+                state.followUps[position] = updated
+            }).start(completed: {
+                WorkspaceAIFollowUpNotifications.synchronize(updated, profile: store.current.activeProfile)
+            }))
+        })
     }
 
     var openRange: (() -> Void)?
@@ -452,7 +672,11 @@ func WorkspaceAIInboxController(context: AccountContext) -> InputDataController 
             openRange: { openRange?() },
             openSettings: { context.bindings.rootNavigation().push(WorkspaceProfilesController(context: context)) },
             openInsight: openInsight,
-            useSuggestion: useSuggestion
+            useSuggestion: useSuggestion,
+            sendSuggestion: sendSuggestion,
+            scheduleSuggestion: scheduleSuggestion,
+            markReviewed: markReviewed,
+            updateFollowUp: updateFollowUp
         ))
     }
     let controller = InputDataController(dataSignal: signal, title: "AI Inbox", removeAfterDisappear: false, hasDone: false, identifier: "workspace_ai_inbox")

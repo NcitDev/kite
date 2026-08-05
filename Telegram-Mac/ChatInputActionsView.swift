@@ -65,7 +65,7 @@ final class StarsSendActionView : Control {
 //
 let iconsInset:CGFloat = 20
 
-private enum CodexAssistantAction {
+private enum CodexAssistantAction: String, Codable {
     case summarize
     case draftReply
     case polishDraft
@@ -90,13 +90,13 @@ private enum CodexAssistantAction {
     var subtitle: String {
         switch self {
         case .summarize:
-            return "Key points & decisions"
+            return "Summarize selected history"
         case .draftReply:
-            return "Based on recent context"
+            return "Reply using selected history"
         case .polishDraft:
-            return "Clearer and more concise"
+            return "Improve your current draft"
         case .actionItems:
-            return "Owners and deadlines"
+            return "Tasks from selected history"
         case .custom:
             return ""
         }
@@ -124,6 +124,45 @@ private enum CodexAssistantAction {
         case .draftReply, .polishDraft, .custom:
             return .replyDrafts
         }
+    }
+}
+
+private struct CodexAssistantHistoryEntry: Codable {
+    let id: UUID
+    let action: CodexAssistantAction
+    let customPrompt: String?
+    let fromDate: Date
+    let toDate: Date
+    let createdAt: Date
+    let response: String
+}
+
+private final class CodexAssistantHistoryStore {
+    private let key: String
+    private let limit = 25
+
+    init(accountId: Int64, profileId: String, peerId: PeerId) {
+        self.key = "telegramwork.codex.history.\(accountId).\(profileId).\(peerId.toInt64())"
+    }
+
+    var entries: [CodexAssistantHistoryEntry] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let entries = try? JSONDecoder().decode([CodexAssistantHistoryEntry].self, from: data) else {
+            return []
+        }
+        return entries
+    }
+
+    func add(_ entry: CodexAssistantHistoryEntry) -> [CodexAssistantHistoryEntry] {
+        var updated = entries.filter { $0.id != entry.id }
+        updated.insert(entry, at: 0)
+        if updated.count > limit {
+            updated.removeLast(updated.count - limit)
+        }
+        if let data = try? JSONEncoder().encode(updated) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+        return updated
     }
 }
 
@@ -227,6 +266,12 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
     private let connectButton = TextButton()
     private let separator = View()
     private let sectionTitle = TextView()
+    private let historyButton = TextButton()
+    private let rangeTitle = TextView()
+    private let fromTitle = TextView()
+    private let toTitle = TextView()
+    private let fromDatePicker = NSDatePicker()
+    private let toDatePicker = NSDatePicker()
     private let summary = CodexAssistantActionControl(action: .summarize)
     private let reply = CodexAssistantActionControl(action: .draftReply)
     private let polish = CodexAssistantActionControl(action: .polishDraft)
@@ -245,10 +290,20 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
     private let newRequestButton = TextButton()
     private var currentAction: CodexAssistantAction?
     private var canAsk = false
+    private var historyEntries: [CodexAssistantHistoryEntry] = []
 
     var actionSelected: ((CodexAssistantAction, String?) -> Void)?
     var connectSelected: (() -> Void)?
     var useResult: ((String, CodexAssistantAction?) -> Void)?
+    var historySelected: ((CodexAssistantHistoryEntry) -> Void)?
+
+    var selectedDateRange: ClosedRange<Date> {
+        let calendar = Calendar.current
+        let start = calendar.startOfDay(for: fromDatePicker.dateValue)
+        let endStart = calendar.startOfDay(for: toDatePicker.dateValue)
+        let end = calendar.date(byAdding: .day, value: 1, to: endStart)?.addingTimeInterval(-1) ?? endStart
+        return start...end
+    }
 
     required init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -259,6 +314,12 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         addSubview(connectButton)
         addSubview(separator)
         addSubview(sectionTitle)
+        addSubview(historyButton)
+        addSubview(rangeTitle)
+        addSubview(fromTitle)
+        addSubview(toTitle)
+        addSubview(fromDatePicker)
+        addSubview(toDatePicker)
         addSubview(summary)
         addSubview(reply)
         addSubview(polish)
@@ -304,6 +365,19 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         responseText.textContainer?.widthTracksTextView = true
         responseText.isVerticallyResizable = true
 
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        fromDatePicker.dateValue = calendar.date(byAdding: .day, value: -6, to: today) ?? today
+        toDatePicker.dateValue = today
+        for picker in [fromDatePicker, toDatePicker] {
+            picker.datePickerStyle = .textFieldAndStepper
+            picker.datePickerElements = [.yearMonthDay]
+            picker.controlSize = .small
+            picker.maxDate = Date()
+            picker.target = self
+            picker.action = #selector(dateRangeChanged(_:))
+        }
+
         askButton.scaleOnClick = true
         askButton.set(handler: { [weak self] _ in
             guard let self else { return }
@@ -335,6 +409,11 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         newRequestButton.scaleOnClick = true
         newRequestButton.set(handler: { [weak self] _ in
             self?.showComposer(clear: true, focus: true)
+        }, for: .Click)
+
+        historyButton.scaleOnClick = true
+        historyButton.set(handler: { [weak self] _ in
+            self?.showHistoryMenu()
         }, for: .Click)
 
         for control in [summary, reply, polish, tasks] {
@@ -371,6 +450,23 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         section.measure(width: 200)
         sectionTitle.update(section)
 
+        let range = TextViewLayout(.initialize(string: "CONVERSATION RANGE", color: theme.colors.grayText, font: .medium(10)))
+        range.measure(width: 200)
+        rangeTitle.update(range)
+
+        let from = TextViewLayout(.initialize(string: "From", color: theme.colors.grayText, font: .normal(11)))
+        from.measure(width: 40)
+        fromTitle.update(from)
+
+        let to = TextViewLayout(.initialize(string: "To", color: theme.colors.grayText, font: .normal(11)))
+        to.measure(width: 28)
+        toTitle.update(to)
+
+        historyButton.set(font: .medium(11), for: .Normal)
+        historyButton.set(color: theme.colors.accent, for: .Normal)
+        historyButton.set(background: .clear, for: .Normal)
+        updateHistoryButton()
+
         for control in [summary, reply, polish, tasks] {
             control.updateTheme()
         }
@@ -406,6 +502,53 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         responseText.textColor = theme.colors.text
         responseText.font = .normal(12)
         progress.progressColor = theme.colors.accent
+    }
+
+    func updateHistory(_ entries: [CodexAssistantHistoryEntry]) {
+        historyEntries = entries
+        updateHistoryButton()
+        needsLayout = true
+    }
+
+    func showHistoryEntry(_ entry: CodexAssistantHistoryEntry) {
+        fromDatePicker.dateValue = entry.fromDate
+        toDatePicker.dateValue = entry.toDate
+        setResult(entry.response, action: entry.action, loading: false)
+    }
+
+    private func updateHistoryButton() {
+        let title = historyEntries.isEmpty ? "No history" : "History (\(historyEntries.count))"
+        historyButton.set(text: title, for: .Normal)
+        historyButton.sizeToFit(NSMakeSize(12, 8))
+        historyButton.isEnabled = !historyEntries.isEmpty
+        historyButton.layer?.opacity = historyEntries.isEmpty ? 0.45 : 1.0
+    }
+
+    private func showHistoryMenu() {
+        guard !historyEntries.isEmpty else { return }
+        let menu = NSMenu()
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        for entry in historyEntries {
+            let from = formatter.string(from: entry.fromDate)
+            let to = formatter.string(from: entry.toDate)
+            let range = from == to ? from : "\(from) – \(to)"
+            menu.addItem(ContextMenuItem("\(entry.action.title) · \(range)", handler: { [weak self] in
+                self?.historySelected?(entry)
+            }))
+        }
+        menu.popUp(positioning: nil, at: NSMakePoint(0, historyButton.frame.height + 4), in: historyButton)
+    }
+
+    @objc private func dateRangeChanged(_ sender: NSDatePicker) {
+        if fromDatePicker.dateValue > toDatePicker.dateValue {
+            if sender === fromDatePicker {
+                toDatePicker.dateValue = fromDatePicker.dateValue
+            } else {
+                fromDatePicker.dateValue = toDatePicker.dateValue
+            }
+        }
     }
 
     func update(status: WorkspaceACPStatus, enabledFeatures: Set<WorkspaceAIFeature>) {
@@ -536,15 +679,22 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         connectButton.setFrameOrigin(NSMakePoint(frame.width - connectButton.frame.width - inset, floor((62 - connectButton.frame.height) / 2)))
         separator.frame = NSMakeRect(0, 62, frame.width, 1)
         sectionTitle.setFrameOrigin(NSMakePoint(inset, 76))
+        historyButton.setFrameOrigin(NSMakePoint(frame.width - historyButton.frame.width - inset, 70))
+
+        rangeTitle.setFrameOrigin(NSMakePoint(inset, 102))
+        fromTitle.setFrameOrigin(NSMakePoint(inset, 130))
+        fromDatePicker.frame = NSMakeRect(52, 120, 132, 24)
+        toTitle.setFrameOrigin(NSMakePoint(202, 130))
+        toDatePicker.frame = NSMakeRect(224, 120, frame.width - 224 - inset, 24)
 
         let gap: CGFloat = 8
         let cardWidth = floor((frame.width - inset * 2 - gap) / 2)
-        summary.frame = NSMakeRect(inset, 98, cardWidth, 62)
-        reply.frame = NSMakeRect(summary.frame.maxX + gap, 98, cardWidth, 62)
-        polish.frame = NSMakeRect(inset, 168, cardWidth, 62)
-        tasks.frame = NSMakeRect(polish.frame.maxX + gap, 168, cardWidth, 62)
+        summary.frame = NSMakeRect(inset, 156, cardWidth, 62)
+        reply.frame = NSMakeRect(summary.frame.maxX + gap, 156, cardWidth, 62)
+        polish.frame = NSMakeRect(inset, 226, cardWidth, 62)
+        tasks.frame = NSMakeRect(polish.frame.maxX + gap, 226, cardWidth, 62)
 
-        let lowerFrame = NSMakeRect(inset, 244, frame.width - inset * 2, frame.height - 260)
+        let lowerFrame = NSMakeRect(inset, 304, frame.width - inset * 2, frame.height - 320)
         promptContainer.frame = lowerFrame
         promptScroll.frame = NSMakeRect(6, 6, promptContainer.frame.width - 12, promptContainer.frame.height - 54)
         promptPlaceholder.setFrameOrigin(NSMakePoint(16, 16))
@@ -572,6 +722,7 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
     private let chatInteraction: ChatInteraction
     private let store: WorkspaceProfileStore
     private let client: WorkspaceACPClient
+    private let historyStore: CodexAssistantHistoryStore
     private let statusDisposable = MetaDisposable()
     private let eventsDisposable = MetaDisposable()
     private let historyDisposable = MetaDisposable()
@@ -580,12 +731,18 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
     private var currentStatus: WorkspaceACPStatus = .disconnected
 
     init(chatInteraction: ChatInteraction) {
+        let store = WorkspaceProfileStore.shared(accountId: chatInteraction.context.account.id.int64)
         self.chatInteraction = chatInteraction
-        self.store = WorkspaceProfileStore.shared(accountId: chatInteraction.context.account.id.int64)
+        self.store = store
         self.client = WorkspaceACPRegistry.shared.client(accountId: chatInteraction.context.account.id.int64)
+        self.historyStore = CodexAssistantHistoryStore(
+            accountId: chatInteraction.context.account.id.int64,
+            profileId: store.current.activeProfile.id,
+            peerId: chatInteraction.peerId
+        )
         super.init(chatInteraction.context)
         bar = .init(height: 0)
-        _frameRect = NSMakeRect(0, 0, 380, 480)
+        _frameRect = NSMakeRect(0, 0, 420, 620)
     }
 
     override func viewDidLoad() {
@@ -593,6 +750,9 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
 
         genericView.actionSelected = { [weak self] action, prompt in
             self?.run(action: action, customPrompt: prompt)
+        }
+        genericView.historySelected = { [weak self] entry in
+            self?.genericView.showHistoryEntry(entry)
         }
         genericView.connectSelected = { [weak self] in
             self?.connectOrOpenSettings()
@@ -615,6 +775,8 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
             self?.currentStatus = status
             self?.genericView.update(status: status, enabledFeatures: enabled)
         }))
+
+        genericView.updateHistory(historyStore.entries)
 
         eventsDisposable.set((client.events |> deliverOnMainQueue).start(next: { [weak self] event in
             guard let self, let action = self.activeAction, let chunk = self.textChunk(from: event.update), !chunk.isEmpty else {
@@ -688,13 +850,14 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
             client.cancelCurrentPrompt()
         }
         activeAction = action
+        let dateRange = genericView.selectedDateRange
         response = ""
         genericView.setResult("Thinking…", action: action, loading: true)
 
         let location = ChatLocationInput.peer(peerId: chatInteraction.peerId, threadId: chatInteraction.chatLocation.threadId)
         let history = context.account.viewTracker.aroundMessageOfInterestHistoryViewForLocation(
             location,
-            count: 40,
+            count: 1_000,
             tag: nil,
             orderStatistics: [],
             additionalData: []
@@ -702,18 +865,29 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
 
         historyDisposable.set(history.start(next: { [weak self] value in
             guard let self else { return }
-            let messages = value.0.entries.map { $0.message }.suffix(30)
+            let matchingMessages = value.0.entries.map { $0.message }.filter { message in
+                let date = Date(timeIntervalSince1970: TimeInterval(message.timestamp))
+                return dateRange.contains(date)
+            }
+            let messages = matchingMessages.suffix(200)
             let transcript = messages.compactMap { message -> String? in
                 let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else { return nil }
                 let author = message.flags.contains(.Incoming) ? (message.author?.displayTitle ?? "Participant") : "You"
                 return "\(author): \(text.replacingOccurrences(of: "\n", with: " "))"
-            }.joined(separator: "\n")
-            self.prompt(action: action, customPrompt: customPrompt, transcript: transcript)
+            }.joined(separator: "\n").suffix(30_000)
+            let omittedCount = max(0, matchingMessages.count - messages.count)
+            self.prompt(
+                action: action,
+                customPrompt: customPrompt,
+                transcript: String(transcript),
+                dateRange: dateRange,
+                omittedCount: omittedCount
+            )
         }))
     }
 
-    private func prompt(action: CodexAssistantAction, customPrompt: String?, transcript: String) {
+    private func prompt(action: CodexAssistantAction, customPrompt: String?, transcript: String, dateRange: ClosedRange<Date>, omittedCount: Int) {
         let draft = chatInteraction.presentation.effectiveInput.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         let task: String
         switch action {
@@ -769,17 +943,21 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
             Task:
             \(task)
 
+            Conversation range:
+            \(self.dateRangeDescription(dateRange))
+            \(omittedCount > 0 ? "The oldest \(omittedCount) matching messages were omitted to keep context bounded." : "")
+
             Local knowledge:
             \(knowledge)
 
             Recent conversation:
-            \(transcript.isEmpty ? "No text messages are available." : transcript)
+            \(transcript.isEmpty ? "No text messages are available in the selected date range." : transcript)
             """
-            self.send(prompt: prompt, action: action)
+            self.send(prompt: prompt, action: action, customPrompt: customPrompt, dateRange: dateRange)
         }
     }
 
-    private func send(prompt: String, action: CodexAssistantAction) {
+    private func send(prompt: String, action: CodexAssistantAction, customPrompt: String?, dateRange: ClosedRange<Date>) {
         client.prompt(prompt) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self, self.activeAction == action else { return }
@@ -789,6 +967,16 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
                         self.genericView.setResult("Codex finished without a text response.", action: nil, loading: false)
                     } else {
                         self.genericView.setResult(self.response, action: action, loading: false)
+                        let entry = CodexAssistantHistoryEntry(
+                            id: UUID(),
+                            action: action,
+                            customPrompt: customPrompt,
+                            fromDate: dateRange.lowerBound,
+                            toDate: dateRange.upperBound,
+                            createdAt: Date(),
+                            response: String(self.response.prefix(50_000))
+                        )
+                        self.genericView.updateHistory(self.historyStore.add(entry))
                     }
                 case let .failure(error):
                     self.genericView.setResult(error.localizedDescription, action: nil, loading: false)
@@ -796,6 +984,13 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
                 self.activeAction = nil
             }
         }
+    }
+
+    private func dateRangeDescription(_ range: ClosedRange<Date>) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return "\(formatter.string(from: range.lowerBound)) through \(formatter.string(from: range.upperBound)), inclusive"
     }
 
     private func textChunk(from update: [String: Any]) -> String? {

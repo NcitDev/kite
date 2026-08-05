@@ -1160,6 +1160,7 @@
 		A7831B2A24040B6B0056AEAC /* StatisticRowItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7831B2924040B6B0056AEAC /* StatisticRowItem.swift */; };
 		A789E08423E05EAE00AEB34A /* ChatListFiltersListController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A789E08323E05EAE00AEB34A /* ChatListFiltersListController.swift */; };
 		F0C0DE012F7A000100000001 /* WorkspaceProfiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0C0DE022F7A000100000001 /* WorkspaceProfiles.swift */; };
+		F0C0DE032F7A000100000001 /* telegramwork_knowledge_mcp.py in Resources */ = {isa = PBXBuildFile; fileRef = F0C0DE042F7A000100000001 /* telegramwork_knowledge_mcp.py */; };
 		A7919138240D1077002011CA /* ChatListFilterPredicate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7919137240D1077002011CA /* ChatListFilterPredicate.swift */; };
 		A7ADC47A2587B3750069737A /* VoiceChatActionButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7ADC4792587B3750069737A /* VoiceChatActionButton.swift */; };
 		A7B6DDD723ED935100B8E01C /* think_spectacular.tgs in Resources */ = {isa = PBXBuildFile; fileRef = A7B6DDD623ED8FDF00B8E01C /* think_spectacular.tgs */; };
@@ -2829,6 +2830,7 @@
 		A7831B2924040B6B0056AEAC /* StatisticRowItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatisticRowItem.swift; sourceTree = "<group>"; };
 		A789E08323E05EAE00AEB34A /* ChatListFiltersListController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatListFiltersListController.swift; sourceTree = "<group>"; };
 		F0C0DE022F7A000100000001 /* WorkspaceProfiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceProfiles.swift; sourceTree = "<group>"; };
+		F0C0DE042F7A000100000001 /* telegramwork_knowledge_mcp.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = telegramwork_knowledge_mcp.py; sourceTree = "<group>"; };
 		A7919137240D1077002011CA /* ChatListFilterPredicate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatListFilterPredicate.swift; sourceTree = "<group>"; };
 		A7ADC4792587B3750069737A /* VoiceChatActionButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceChatActionButton.swift; sourceTree = "<group>"; };
 		A7B6DDD623ED8FDF00B8E01C /* think_spectacular.tgs */ = {isa = PBXFileReference; lastKnownFileType = file; path = think_spectacular.tgs; sourceTree = "<group>"; };
@@ -4942,6 +4944,7 @@
 			children = (
 				A789E08323E05EAE00AEB34A /* ChatListFiltersListController.swift */,
 				F0C0DE022F7A000100000001 /* WorkspaceProfiles.swift */,
+				F0C0DE042F7A000100000001 /* telegramwork_knowledge_mcp.py */,
 				D0FFC4AB23E184BA0044D305 /* ChatListFilterController.swift */,
 				A7919137240D1077002011CA /* ChatListFilterPredicate.swift */,
 				A7029EF7240E3A5400A89ABD /* ChatListFiltersHeaderItem.swift */,
@@ -7204,6 +7207,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F0C0DE032F7A000100000001 /* telegramwork_knowledge_mcp.py in Resources */,
 				272934102778DFFA00F10D3C /* menu_file.tgs in Resources */,
 				27803C0127A3E944007B0FA9 /* menu_folder_student.tgs in Resources */,
 				27C6B65D29DC123500F7E7AC /* share_folder.tgs in Resources */,

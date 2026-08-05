@@ -19,6 +19,52 @@ enum WorkspaceProfileKind: String, Codable {
     case custom
 }
 
+enum WorkspaceKnowledgeIntegrationKind: String, Codable {
+    case obsidian
+
+    var title: String {
+        switch self {
+        case .obsidian:
+            return "Obsidian Vault"
+        }
+    }
+}
+
+struct WorkspaceKnowledgeIntegration: Codable, Equatable {
+    let id: String
+    var name: String
+    let kind: WorkspaceKnowledgeIntegrationKind
+    var rootPath: String
+    var instructions: String
+    var isEnabled: Bool
+    var usesLocalSearch: Bool
+    var exposesCodexTools: Bool
+
+    static func obsidian() -> WorkspaceKnowledgeIntegration {
+        return WorkspaceKnowledgeIntegration(
+            id: "obsidian.\(UUID().uuidString)",
+            name: "Obsidian",
+            kind: .obsidian,
+            rootPath: "",
+            instructions: "Use these notes as my personal knowledge base. Prefer relevant notes over guesses and cite the relative note path when you use them.",
+            isEnabled: true,
+            usesLocalSearch: true,
+            exposesCodexTools: true
+        )
+    }
+
+    var expandedRootPath: String {
+        return (rootPath as NSString).expandingTildeInPath
+    }
+
+    var hasValidRoot: Bool {
+        var isDirectory: ObjCBool = false
+        return !expandedRootPath.isEmpty
+            && FileManager.default.fileExists(atPath: expandedRootPath, isDirectory: &isDirectory)
+            && isDirectory.boolValue
+    }
+}
+
 struct WorkspaceProfile: Codable, Equatable {
     let id: String
     var name: String
@@ -30,6 +76,8 @@ struct WorkspaceProfile: Codable, Equatable {
     var includedPeerIds: [Int64]
     /// Namespaced switches allow later features to become profile-scoped without a migration.
     var featureFlags: [String: Bool]
+    /// Knowledge integrations are profile-scoped so Work and Home never share sources implicitly.
+    var knowledgeIntegrations: [WorkspaceKnowledgeIntegration]
 
     func displays(folderId: Int32) -> Bool {
         return showsAllFolders || visibleFolderIds.contains(folderId)
@@ -51,6 +99,7 @@ extension WorkspaceProfile {
         case showsStories
         case includedPeerIds
         case featureFlags
+        case knowledgeIntegrations
     }
 
     init(from decoder: Decoder) throws {
@@ -64,6 +113,7 @@ extension WorkspaceProfile {
         self.showsStories = try container.decodeIfPresent(Bool.self, forKey: .showsStories) ?? true
         self.includedPeerIds = try container.decodeIfPresent([Int64].self, forKey: .includedPeerIds) ?? []
         self.featureFlags = try container.decodeIfPresent([String: Bool].self, forKey: .featureFlags) ?? [:]
+        self.knowledgeIntegrations = try container.decodeIfPresent([WorkspaceKnowledgeIntegration].self, forKey: .knowledgeIntegrations) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -77,6 +127,7 @@ extension WorkspaceProfile {
         try container.encode(showsStories, forKey: .showsStories)
         try container.encode(includedPeerIds, forKey: .includedPeerIds)
         try container.encode(featureFlags, forKey: .featureFlags)
+        try container.encode(knowledgeIntegrations, forKey: .knowledgeIntegrations)
     }
 }
 
@@ -208,7 +259,8 @@ struct WorkspaceProfileState: Codable, Equatable {
             receivesNotifications: true,
             showsStories: true,
             includedPeerIds: [],
-            featureFlags: [:]
+            featureFlags: [:],
+            knowledgeIntegrations: []
         )
         let home = WorkspaceProfile(
             id: "builtin.home",
@@ -219,7 +271,8 @@ struct WorkspaceProfileState: Codable, Equatable {
             receivesNotifications: true,
             showsStories: true,
             includedPeerIds: [],
-            featureFlags: [:]
+            featureFlags: [:],
+            knowledgeIntegrations: []
         )
         return WorkspaceProfileState(
             schemaVersion: 2,
@@ -311,7 +364,8 @@ final class WorkspaceProfileStore {
                 receivesNotifications: true,
                 showsStories: true,
                 includedPeerIds: [],
-                featureFlags: [:]
+                featureFlags: [:],
+                knowledgeIntegrations: []
             )
             state.profiles.append(profile)
             state.activeProfileId = profile.id
@@ -339,6 +393,22 @@ final class WorkspaceProfileStore {
     func updateACP(_ transform: (inout WorkspaceACPConfiguration) -> Void) {
         update { state in
             transform(&state.acp)
+        }
+    }
+
+    func addObsidianIntegration() {
+        updateActive { profile in
+            profile.knowledgeIntegrations.append(.obsidian())
+            // Adding knowledge is an explicit request to use Codex from the composer.
+            // Enable the two read-only composer capabilities so setup is not split across sections.
+            profile.featureFlags[WorkspaceAIFeature.chatSummaries.rawValue] = true
+            profile.featureFlags[WorkspaceAIFeature.replyDrafts.rawValue] = true
+        }
+    }
+
+    func removeIntegration(_ integrationId: String) {
+        updateActive { profile in
+            profile.knowledgeIntegrations.removeAll(where: { $0.id == integrationId })
         }
     }
 
@@ -392,6 +462,146 @@ final class WorkspaceProfileStore {
             visible.insert(profileFilter, at: 0)
         }
         return visible
+    }
+}
+
+struct WorkspaceKnowledgeSnippet {
+    let integrationName: String
+    let relativePath: String
+    let text: String
+    let instructions: String
+    let score: Int
+}
+
+final class WorkspaceKnowledgeRetriever {
+    static let shared = WorkspaceKnowledgeRetriever()
+
+    private let queue = DispatchQueue(label: "telegram.workspace-knowledge", qos: .userInitiated)
+    private let stopWords: Set<String> = [
+        "about", "after", "again", "also", "and", "are", "been", "before", "but", "can", "could",
+        "does", "for", "from", "have", "help", "into", "just", "more", "not", "only", "our", "please",
+        "should", "that", "the", "their", "them", "then", "there", "these", "they", "this", "those",
+        "want", "was", "what", "when", "where", "which", "with", "would", "you", "your"
+    ]
+
+    func search(
+        query: String,
+        integrations: [WorkspaceKnowledgeIntegration],
+        completion: @escaping ([WorkspaceKnowledgeSnippet]) -> Void
+    ) {
+        queue.async { [weak self] in
+            guard let self else {
+                DispatchQueue.main.async { completion([]) }
+                return
+            }
+            let results = self.searchOnQueue(query: query, integrations: integrations)
+            DispatchQueue.main.async {
+                completion(results)
+            }
+        }
+    }
+
+    private func searchOnQueue(query: String, integrations: [WorkspaceKnowledgeIntegration]) -> [WorkspaceKnowledgeSnippet] {
+        let tokens = query
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count > 2 && !stopWords.contains($0) }
+            .reduce(into: [String]()) { result, token in
+                if !result.contains(token), result.count < 20 {
+                    result.append(token)
+                }
+            }
+        guard !tokens.isEmpty else {
+            return []
+        }
+
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var results: [WorkspaceKnowledgeSnippet] = []
+        for integration in integrations where integration.isEnabled && integration.usesLocalSearch && integration.hasValidRoot {
+            let rootURL = URL(fileURLWithPath: integration.expandedRootPath, isDirectory: true).standardizedFileURL
+            let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey]
+            guard let enumerator = FileManager.default.enumerator(
+                at: rootURL,
+                includingPropertiesForKeys: keys,
+                options: [.skipsHiddenFiles, .skipsPackageDescendants],
+                errorHandler: { _, _ in true }
+            ) else {
+                continue
+            }
+
+            var scannedFiles = 0
+            while let fileURL = enumerator.nextObject() as? URL, scannedFiles < 5000 {
+                guard let values = try? fileURL.resourceValues(forKeys: Set(keys)) else {
+                    continue
+                }
+                if values.isSymbolicLink == true {
+                    if values.isDirectory == true {
+                        enumerator.skipDescendants()
+                    }
+                    continue
+                }
+                if values.isDirectory == true {
+                    if fileURL.lastPathComponent == ".obsidian" {
+                        enumerator.skipDescendants()
+                    }
+                    continue
+                }
+                guard values.isRegularFile == true,
+                      fileURL.pathExtension.lowercased() == "md",
+                      (values.fileSize ?? 0) <= 1_048_576 else {
+                    continue
+                }
+                scannedFiles += 1
+                guard let content = try? String(contentsOf: fileURL, encoding: .utf8), !content.isEmpty else {
+                    continue
+                }
+
+                let relativePath = String(fileURL.path.dropFirst(min(rootURL.path.count + 1, fileURL.path.count)))
+                let searchablePath = relativePath.lowercased()
+                let searchableContent = content.lowercased()
+                var score = 0
+                var firstMatch: String.Index?
+                for token in tokens {
+                    if searchablePath.contains(token) {
+                        score += 6
+                    }
+                    if let range = content.range(of: token, options: [.caseInsensitive, .diacriticInsensitive]) {
+                        score += 2
+                        if firstMatch == nil || range.lowerBound < firstMatch! {
+                            firstMatch = range.lowerBound
+                        }
+                    }
+                }
+                if normalizedQuery.count > 4, searchableContent.contains(normalizedQuery) {
+                    score += 12
+                }
+                guard score > 0 else {
+                    continue
+                }
+
+                let excerpt: String
+                if let firstMatch {
+                    let start = content.index(firstMatch, offsetBy: -500, limitedBy: content.startIndex) ?? content.startIndex
+                    let end = content.index(firstMatch, offsetBy: 1100, limitedBy: content.endIndex) ?? content.endIndex
+                    excerpt = String(content[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+                } else {
+                    excerpt = String(content.prefix(1400)).trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                results.append(WorkspaceKnowledgeSnippet(
+                    integrationName: integration.name,
+                    relativePath: relativePath,
+                    text: excerpt,
+                    instructions: integration.instructions,
+                    score: score
+                ))
+            }
+        }
+        return Array(results.sorted { lhs, rhs in
+            if lhs.score != rhs.score {
+                return lhs.score > rhs.score
+            }
+            return lhs.relativePath < rhs.relativePath
+        }.prefix(8))
     }
 }
 
@@ -461,6 +671,7 @@ final class WorkspaceACPClient {
     private var agentName: String?
     private var authenticationMethods: [WorkspaceACPAuthMethod] = []
     private var permissionHandler: WorkspaceACPPermissionHandler?
+    private var knowledgeIntegrations: [WorkspaceKnowledgeIntegration] = []
 
     var status: Signal<WorkspaceACPStatus, NoError> {
         return statusPromise.get()
@@ -481,12 +692,14 @@ final class WorkspaceACPClient {
     func connect(
         configuration: WorkspaceACPConfiguration,
         enabledFeatures: [WorkspaceAIFeature],
+        knowledgeIntegrations: [WorkspaceKnowledgeIntegration],
         permissionHandler: @escaping WorkspaceACPPermissionHandler
     ) {
         queue.async { [weak self] in
             self?.connectOnQueue(
                 configuration: configuration,
                 enabledFeatures: enabledFeatures,
+                knowledgeIntegrations: knowledgeIntegrations,
                 permissionHandler: permissionHandler
             )
         }
@@ -546,6 +759,7 @@ final class WorkspaceACPClient {
     private func connectOnQueue(
         configuration: WorkspaceACPConfiguration,
         enabledFeatures: [WorkspaceAIFeature],
+        knowledgeIntegrations: [WorkspaceKnowledgeIntegration],
         permissionHandler: @escaping WorkspaceACPPermissionHandler
     ) {
         stopOnQueue(status: .connecting)
@@ -592,6 +806,7 @@ final class WorkspaceACPClient {
             self.input = inputPipe.fileHandleForWriting
             self.configuration = configuration
             self.permissionHandler = permissionHandler
+            self.knowledgeIntegrations = knowledgeIntegrations
             sendRequest(method: "initialize", params: [
                 "protocolVersion": 1,
                 "clientCapabilities": [
@@ -645,7 +860,7 @@ final class WorkspaceACPClient {
         }
         sendRequest(method: "session/new", params: [
             "cwd": configuration.workingDirectory,
-            "mcpServers": []
+            "mcpServers": mcpServersForActiveIntegrations()
         ]) { [weak self] response in
             guard let self else { return }
             if let error = response["error"] as? [String: Any] {
@@ -681,6 +896,7 @@ final class WorkspaceACPClient {
         agentName = nil
         authenticationMethods = []
         permissionHandler = nil
+        knowledgeIntegrations = []
         outputBuffer.removeAll(keepingCapacity: false)
         current?.standardOutput.flatMap { ($0 as? Pipe)?.fileHandleForReading.readabilityHandler = nil }
         current?.standardError.flatMap { ($0 as? Pipe)?.fileHandleForReading.readabilityHandler = nil }
@@ -688,6 +904,26 @@ final class WorkspaceACPClient {
             current?.terminate()
         }
         statusPromise.set(status)
+    }
+
+    private func mcpServersForActiveIntegrations() -> [[String: Any]] {
+        guard let scriptPath = Bundle.main.path(forResource: "telegramwork_knowledge_mcp", ofType: "py") else {
+            return []
+        }
+        return knowledgeIntegrations.compactMap { integration in
+            guard integration.isEnabled, integration.exposesCodexTools, integration.hasValidRoot else {
+                return nil
+            }
+            return [
+                "name": "\(integration.kind.title): \(integration.name)",
+                "command": "/usr/bin/python3",
+                "args": [scriptPath, "--root", integration.expandedRootPath],
+                "env": [[
+                    "name": "TELEGRAMWORK_INTEGRATION_INSTRUCTIONS",
+                    "value": integration.instructions
+                ]]
+            ]
+        }
     }
 
     private func sendRequest(method: String, params: [String: Any], completion: @escaping ([String: Any]) -> Void) {
@@ -835,6 +1071,14 @@ private let workspaceACPExecutableId = InputDataIdentifier("workspace.acp.execut
 private let workspaceACPArgumentsId = InputDataIdentifier("workspace.acp.arguments")
 private let workspaceACPDirectoryId = InputDataIdentifier("workspace.acp.directory")
 
+private func workspaceIntegrationPathId(_ integrationId: String) -> InputDataIdentifier {
+    return InputDataIdentifier("workspace.integration.\(integrationId).path")
+}
+
+private func workspaceIntegrationInstructionsId(_ integrationId: String) -> InputDataIdentifier {
+    return InputDataIdentifier("workspace.integration.\(integrationId).instructions")
+}
+
 private func workspaceProfileEntries(
     context: AccountContext,
     state: WorkspaceProfileState,
@@ -950,6 +1194,76 @@ private func workspaceProfileEntries(
 
     entries.append(.sectionId(sectionId, type: .normal))
     sectionId += 1
+    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("KNOWLEDGE INTEGRATIONS"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
+    index += 1
+    if active.knowledgeIntegrations.isEmpty {
+        entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Connect local knowledge to this profile. Add a vault, provide its folder path and plain-language instructions, and TelegramWork configures both local retrieval and Codex tools."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
+        index += 1
+    }
+    for integration in active.knowledgeIntegrations {
+        entries.append(.desc(sectionId: sectionId, index: index, text: .plain(integration.kind.title.uppercased()), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
+        index += 1
+        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.integration.\(integration.id).enabled"), data: .init(name: "Enabled", color: theme.colors.text, type: .switchable(integration.isEnabled), viewType: .firstItem, action: {
+            store.updateActive { profile in
+                guard let position = profile.knowledgeIntegrations.firstIndex(where: { $0.id == integration.id }) else { return }
+                profile.knowledgeIntegrations[position].isEnabled.toggle()
+            }
+        }, autoswitch: false)))
+        index += 1
+        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.integration.\(integration.id).local-search"), data: .init(name: "Search Notes for Every Request", color: theme.colors.text, type: .switchable(integration.usesLocalSearch), viewType: .innerItem, action: {
+            store.updateActive { profile in
+                guard let position = profile.knowledgeIntegrations.firstIndex(where: { $0.id == integration.id }) else { return }
+                profile.knowledgeIntegrations[position].usesLocalSearch.toggle()
+            }
+        }, autoswitch: false)))
+        index += 1
+        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.integration.\(integration.id).codex-tools"), data: .init(name: "Expose Read-Only Tools to Codex", color: theme.colors.text, type: .switchable(integration.exposesCodexTools), viewType: .lastItem, action: {
+            client.disconnect()
+            store.updateActive { profile in
+                guard let position = profile.knowledgeIntegrations.firstIndex(where: { $0.id == integration.id }) else { return }
+                profile.knowledgeIntegrations[position].exposesCodexTools.toggle()
+            }
+        }, autoswitch: false)))
+        index += 1
+        entries.append(.input(sectionId: sectionId, index: index, value: .string(integration.rootPath), error: nil, identifier: workspaceIntegrationPathId(integration.id), mode: .plain, data: .init(viewType: .firstItem), placeholder: nil, inputPlaceholder: "Obsidian vault folder path", filter: { $0 }, limit: 4096))
+        index += 1
+        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.integration.\(integration.id).choose"), data: .init(name: "Choose Vault Folder…", color: theme.colors.accent, type: .next, viewType: .lastItem, action: {
+            filePanel(with: [], canChooseDirectories: true, for: context.window, completion: { paths in
+                guard let path = paths?.first else { return }
+                client.disconnect()
+                store.updateActive { profile in
+                    guard let position = profile.knowledgeIntegrations.firstIndex(where: { $0.id == integration.id }) else { return }
+                    profile.knowledgeIntegrations[position].rootPath = path
+                }
+            })
+        })))
+        index += 1
+        entries.append(.input(sectionId: sectionId, index: index, value: .string(integration.instructions), error: nil, identifier: workspaceIntegrationInstructionsId(integration.id), mode: .plain, data: .init(viewType: .singleItem), placeholder: nil, inputPlaceholder: "Instructions for Codex", filter: { $0 }, limit: 4096))
+        index += 1
+        let integrationStatus: String
+        if integration.rootPath.isEmpty {
+            integrationStatus = "Choose your Obsidian vault folder. Instructions describe how Codex should interpret and cite this knowledge."
+        } else if integration.hasValidRoot {
+            integrationStatus = "Ready · Markdown only · local search and bundled MCP access are read-only. Reconnect the agent after changing this integration."
+        } else {
+            integrationStatus = "Vault folder is unavailable. Check the path or choose the folder again."
+        }
+        entries.append(.desc(sectionId: sectionId, index: index, text: .plain(integrationStatus), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
+        index += 1
+        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.integration.\(integration.id).remove"), data: .init(name: "Remove \(integration.kind.title)", color: theme.colors.redUI, type: .none, viewType: .singleItem, action: {
+            client.disconnect()
+            store.removeIntegration(integration.id)
+        })))
+        index += 1
+    }
+    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.integration.add.obsidian"), data: .init(name: "Add Obsidian Vault", color: theme.colors.accent, type: .none, viewType: .singleItem, action: {
+        client.disconnect()
+        store.addObsidianIntegration()
+    })))
+    index += 1
+
+    entries.append(.sectionId(sectionId, type: .normal))
+    sectionId += 1
     entries.append(.desc(sectionId: sectionId, index: index, text: .plain("AI AGENT · AGENT CLIENT PROTOCOL"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
     index += 1
     for provider in WorkspaceACPProvider.allCases {
@@ -984,7 +1298,7 @@ private func workspaceProfileEntries(
         } else {
             let current = store.current
             let features = WorkspaceAIFeature.allCases.filter { current.activeProfile.isEnabled($0) }
-            client.connect(configuration: current.acp, enabledFeatures: features, permissionHandler: { title, options, completion in
+            client.connect(configuration: current.acp, enabledFeatures: features, knowledgeIntegrations: current.activeProfile.knowledgeIntegrations, permissionHandler: { title, options, completion in
                 DispatchQueue.main.async {
                     guard let allow = options.first(where: { $0.kind == "allow_once" }) ?? options.first(where: { $0.kind == "allow_always" }) else {
                         completion(options.first(where: { $0.kind == "reject_once" || $0.kind == "reject_always" })?.id)
@@ -1057,6 +1371,28 @@ func WorkspaceProfilesController(context: AccountContext) -> InputDataController
             }
             if let directory = data[workspaceACPDirectoryId]?.stringValue, !directory.isEmpty {
                 configuration.workingDirectory = directory
+            }
+        }
+        let currentIntegrations = store.current.activeProfile.knowledgeIntegrations
+        if !currentIntegrations.isEmpty {
+            let integrationChanged = currentIntegrations.contains { integration in
+                let path = data[workspaceIntegrationPathId(integration.id)]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let instructions = data[workspaceIntegrationInstructionsId(integration.id)]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+                return (path != nil && path != integration.rootPath) || (instructions != nil && instructions != integration.instructions)
+            }
+            if integrationChanged {
+                client.disconnect()
+            }
+            store.updateActive { profile in
+                for position in profile.knowledgeIntegrations.indices {
+                    let id = profile.knowledgeIntegrations[position].id
+                    if let path = data[workspaceIntegrationPathId(id)]?.stringValue {
+                        profile.knowledgeIntegrations[position].rootPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                    if let instructions = data[workspaceIntegrationInstructionsId(id)]?.stringValue {
+                        profile.knowledgeIntegrations[position].instructions = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                }
             }
         }
         return .none

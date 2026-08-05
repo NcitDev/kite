@@ -340,7 +340,9 @@ final class WorkspaceProfileStore {
             decoded = .defaultValue
         }
         self.value = Atomic(value: decoded)
-        self.promise = ValuePromise(decoded, ignoreRepeated: true)
+        // Badge-only updates intentionally re-emit the same persisted profile state so
+        // synthetic folder titles can refresh without changing profile configuration.
+        self.promise = ValuePromise(decoded, ignoreRepeated: false)
     }
 
     var signal: Signal<WorkspaceProfileState, NoError> {

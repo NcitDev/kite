@@ -409,6 +409,117 @@ fileprivate enum ChatListSearchEntry: Comparable, Identifiable {
     }
 }
 
+/// Global search has several independent local and remote producers. Apply the workspace
+/// allowlist after they are merged so channels, apps, media, cached rows, and suggestions
+/// cannot bypass profile isolation. An empty Profile Chats list keeps legacy unrestricted
+/// behavior; choosing at least one chat turns the list into a strict allowlist.
+private func workspaceFilteredSearchEntries(
+    _ entries: [ChatListSearchEntry],
+    profile: WorkspaceProfile
+) -> [ChatListSearchEntry] {
+    let allowedPeerIds = Set(profile.includedPeerIds.map(PeerId.init))
+    guard !allowedPeerIds.isEmpty else {
+        return entries
+    }
+
+    func filteredEntry(_ entry: ChatListSearchEntry) -> ChatListSearchEntry? {
+        switch entry {
+        case let .localPeer(peer, index, secretChat, badge, drawBorder, canAddAsTag, storyStats):
+            return allowedPeerIds.contains(peer.peerId)
+                ? .localPeer(peer, index, secretChat, badge, drawBorder, canAddAsTag, storyStats)
+                : nil
+        case let .topic(item, index, badge, drawBorder, canAddAsTag):
+            return allowedPeerIds.contains(item.renderedPeer.peerId)
+                ? .topic(item, index, badge, drawBorder, canAddAsTag)
+                : nil
+        case let .recentlySearch(peer, index, secretChat, status, badge, drawBorder, storyStats, canRemoveRecent, isGrossingApp, isRecentApp):
+            return allowedPeerIds.contains(peer.peerId)
+                ? .recentlySearch(peer, index, secretChat, status, badge, drawBorder, storyStats, canRemoveRecent, isGrossingApp: isGrossingApp, isRecentApp: isRecentApp)
+                : nil
+        case let .globalPeer(foundPeer, badge, index, adPeer):
+            return allowedPeerIds.contains(foundPeer.peer.id)
+                ? .globalPeer(foundPeer, badge, index, adPeer)
+                : nil
+        case let .savedMessages(peer):
+            return allowedPeerIds.contains(peer.id) ? .savedMessages(peer) : nil
+        case let .message(message, query, readState, threadData, index):
+            return allowedPeerIds.contains(message.id.peerId)
+                ? .message(message, query, readState, threadData, index)
+                : nil
+        case let .topPeers(index, articlesEnabled, unreadArticles, selfPeer, peers, unread, online):
+            // PopularPeersRowItem always renders Saved Messages, so omit the entire row when
+            // the account peer is not explicitly allowed rather than leaking that destination.
+            guard allowedPeerIds.contains(selfPeer.id) else {
+                return nil
+            }
+            let peers = peers.filter { allowedPeerIds.contains($0.id) }
+            let peerIds = Set(peers.map(\.id))
+            return .topPeers(
+                index,
+                articlesEnabled: articlesEnabled,
+                unreadArticles: unreadArticles,
+                selfPeer: selfPeer,
+                peers: peers,
+                unread: unread.filter { peerIds.contains($0.key) },
+                online: online.filter { peerIds.contains($0.key) }
+            )
+        case .foundStories:
+            // StoryListContext.State is an opaque aggregate and cannot be filtered safely.
+            return nil
+        case .separator, .emptySearch, .emptyList, .disclaimer:
+            return entry
+        }
+    }
+
+    let filtered = entries.compactMap(filteredEntry)
+    func isVisibleContent(_ entry: ChatListSearchEntry) -> Bool {
+        switch entry {
+        case .localPeer, .topic, .recentlySearch, .globalPeer, .savedMessages, .message, .topPeers:
+            return true
+        default:
+            return false
+        }
+    }
+
+    var result: [ChatListSearchEntry] = []
+    for (index, entry) in filtered.enumerated() {
+        switch entry {
+        case .separator:
+            let hasContentBeforeNextSeparator = filtered.dropFirst(index + 1).prefix { candidate in
+                if case .separator = candidate {
+                    return false
+                }
+                return true
+            }.contains(where: isVisibleContent)
+            if hasContentBeforeNextSeparator {
+                result.append(entry)
+            }
+        case .disclaimer:
+            if result.contains(where: isVisibleContent) {
+                result.append(entry)
+            }
+        case .emptySearch, .emptyList:
+            if !filtered.contains(where: isVisibleContent) {
+                result.append(entry)
+            }
+        default:
+            result.append(entry)
+        }
+    }
+    if !result.contains(where: isVisibleContent)
+        && !result.contains(where: { entry in
+            switch entry {
+            case .emptySearch, .emptyList:
+                return true
+            default:
+                return false
+            }
+        }) {
+        result.append(.emptySearch(isLoading: false))
+    }
+    return result
+}
+
 
 private func peerContextMenuItems(peer: Peer, pinnedItems:[PinnedItemId], arguments: SearchControllerArguments, isRecent: Bool) -> Signal<[ContextMenuItem], NoError> {
     var items:[ContextMenuItem] = []
@@ -1725,7 +1836,12 @@ class SearchController: GenericViewController<TableView>,TableViewDelegate {
         }
         
         
-        let transition = combineLatest(queue: prepareQueue, searchItems, appearanceSignal, context.globalPeerHandler.get() |> distinctUntilChanged, pinnedPromise.get()) |> map { value, appearance, location, pinnedItems in
+        let workspaceProfile = WorkspaceProfileStore.shared(accountId: context.account.id.int64).signal |> map { $0.activeProfile }
+        let profileFilteredSearchItems = combineLatest(searchItems, workspaceProfile) |> map { value, profile in
+            return (workspaceFilteredSearchEntries(value.0, profile: profile), value.1, value.2, value.3, value.4)
+        }
+
+        let transition = combineLatest(queue: prepareQueue, profileFilteredSearchItems, appearanceSignal, context.globalPeerHandler.get() |> distinctUntilChanged, pinnedPromise.get()) |> map { value, appearance, location, pinnedItems in
             return (value.0.map {AppearanceWrapperEntry(entry: $0, appearance: appearance)}, value.1, value.2 ? nil : location, value.2, pinnedItems, value.3, value.4)
         }
         |> map { entries, loading, location, animated, pinnedItems, searchMessagesState, searchMessagesResult -> (TableUpdateTransition, Bool, ChatLocation?, SearchMessagesState?, SearchMessagesResult?) in

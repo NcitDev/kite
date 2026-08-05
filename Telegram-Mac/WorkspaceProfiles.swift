@@ -1262,7 +1262,7 @@ private func workspaceProfileEntries(
     entries.append(.desc(sectionId: sectionId, index: index, text: .plain("AI ACTION APPROVALS"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
     index += 1
     for capability in WorkspaceAICapability.allCases {
-        let decision = active.approval(for: capability)
+        let decision = active.approvalDecision(for: capability)
         entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.approval.\(capability.rawValue)"), data: .init(
             name: capability.title,
             color: theme.colors.text,
@@ -1270,7 +1270,7 @@ private func workspaceProfileEntries(
             viewType: .singleItem,
             action: {
                 store.updateActive { profile in
-                    switch profile.approval(for: capability) {
+                    switch profile.approvalDecision(for: capability) {
                     case .ask:
                         profile.aiApprovals[capability.rawValue] = .allowAlways
                     case .allowAlways:

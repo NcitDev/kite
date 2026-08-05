@@ -46,6 +46,7 @@ private enum WorkspaceAIInboxGenerationError: LocalizedError {
 
 private enum WorkspaceAIFollowUpNotifications {
     static func synchronize(_ followUp: WorkspaceFollowUp, profile: WorkspaceProfile) {
+        guard #available(macOS 10.14, *) else { return }
         let center = UNUserNotificationCenter.current()
         center.removePendingNotificationRequests(withIdentifiers: [followUp.id])
         guard profile.aiWorkflow.macOSNotificationsEnabled,
@@ -74,7 +75,7 @@ private func workspaceAIPerformApproved(
     action: @escaping () -> Void
 ) {
     let profile = store.current.activeProfile
-    switch profile.approval(for: capability) {
+    switch profile.approvalDecision(for: capability) {
     case .allowAlways:
         action()
     case .neverAllow:

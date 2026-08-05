@@ -478,6 +478,9 @@ final class SharedNotificationManager : NSObject, NSUserNotificationCenterDelega
                     return .complete()
                 }
             } |> deliverOnMainQueue).start(next: { sources, images, inAppSettings, screenIsLocked, accountPeer, soundPath, notifications in
+                guard WorkspaceProfileStore.shared(accountId: account.id.int64).current.activeProfile.receivesNotifications else {
+                    return
+                }
                 
                 if !primary, !inAppSettings.notifyAllAccounts {
                     return

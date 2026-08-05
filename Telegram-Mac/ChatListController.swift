@@ -1262,6 +1262,7 @@ class ChatListController : PeersListController {
         
         let filterView = chatListFilterPreferences(engine: context.engine) |> deliverOnMainQueue |> distinctUntilChanged
         let filterBadges = chatListFilterItems(engine: context.engine, accountManager: context.sharedContext.accountManager) |> deliverOnMainQueue |> distinctUntilChanged
+        let workspaceProfiles = WorkspaceProfileStore.shared(accountId: context.account.id.int64)
         
         switch mode {
         case let .filter(filterId):
@@ -1284,24 +1285,29 @@ class ChatListController : PeersListController {
                 }
             }))
         case .folder:
-            filterDisposable.set(filterView.start(next: { [weak self] filters in
+            filterDisposable.set(combineLatest(filterView, workspaceProfiles.signal |> deliverOnMainQueue).start(next: { [weak self] filters, _ in
                 self?.updateFilter( { current in
                     var current = current
-                    current = current.withUpdatedTabs(filters.list)
+                    let visibleFilters = workspaceProfiles.visibleFilters(filters.list)
+                    current = current.withUpdatedTabs(visibleFilters)
                         .withUpdatedSidebar(filters.sidebar)
                         .withUpdatedShowTags(filters.showTags)
+                    if !visibleFilters.contains(where: { $0.id == current.filter.id }) {
+                        current = current.withUpdatedFilter(nil)
+                    }
                     return current
                 } )
             }))
         default:
             var first: Bool = true
-            filterDisposable.set(combineLatest(filterView, filterBadges).start(next: { [weak self] filters, badges in
+            filterDisposable.set(combineLatest(filterView, filterBadges, workspaceProfiles.signal |> deliverOnMainQueue).start(next: { [weak self] filters, badges, _ in
                 self?.updateFilter( { current in
                     var current = current
-                    current = current.withUpdatedTabs(filters.list)
+                    let visibleFilters = workspaceProfiles.visibleFilters(filters.list)
+                    current = current.withUpdatedTabs(visibleFilters)
                         .withUpdatedSidebar(filters.sidebar)
                         .withUpdatedShowTags(filters.showTags)
-                    if !first, let updated = filters.list.first(where: { $0.id == current.filter.id }) {
+                    if !first, let updated = visibleFilters.first(where: { $0.id == current.filter.id }) {
                         current = current.withUpdatedFilter(updated)
                     } else {
                         current = current.withUpdatedFilter(nil)
@@ -2158,4 +2164,3 @@ class ChatListController : PeersListController {
     }
   
 }
-

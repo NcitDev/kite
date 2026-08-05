@@ -145,6 +145,7 @@ private enum AccountInfoEntry : TableItemListNodeEntry {
     case passport(index: Int, viewType: GeneralViewType, peer: PeerEquatable)
     case update(index: Int, viewType: GeneralViewType, state: AnyUpdateStateEquatable)
     case filters(index: Int, viewType: GeneralViewType)
+    case workspaceProfiles(index: Int, viewType: GeneralViewType)
     case premium(index: Int, viewType: GeneralViewType)
     case business(index: Int, viewType: GeneralViewType)
     case giftPremium(index: Int, viewType: GeneralViewType)
@@ -190,6 +191,8 @@ private enum AccountInfoEntry : TableItemListNodeEntry {
             return .index(13)
         case .filters:
             return .index(14)
+        case .workspaceProfiles:
+            return .index(900)
         case .update:
             return .index(15)
         case .appearance:
@@ -260,6 +263,8 @@ private enum AccountInfoEntry : TableItemListNodeEntry {
         case let .passport(index, _, _):
             return index
         case let .filters(index, _):
+            return index
+        case let .workspaceProfiles(index, _):
             return index
         case let .premium(index, _):
             return index
@@ -452,6 +457,10 @@ private enum AccountInfoEntry : TableItemListNodeEntry {
             return GeneralInteractedRowItem(initialSize, stableId: stableId, name: strings().accountSettingsFilters, icon: theme.icons.settingsFilters, activeIcon: theme.icons.settingsFiltersActive, type: .next, viewType: viewType, action: {
                 arguments.presentController(ChatListFiltersListController(context: arguments.context), true)
             }, border:[BorderType.Right], inset:NSEdgeInsets(left: 12, right: 12))
+        case let .workspaceProfiles(_, viewType):
+            return GeneralInteractedRowItem(initialSize, stableId: stableId, name: "Profiles & Automation", icon: theme.icons.settingsFilters, activeIcon: theme.icons.settingsFiltersActive, type: .next, viewType: viewType, action: {
+                arguments.presentController(WorkspaceProfilesController(context: arguments.context), true)
+            }, border:[BorderType.Right], inset:NSEdgeInsets(left: 12, right: 12))
         case let .update(_, viewType, state):
             
             var text: String = ""
@@ -619,6 +628,9 @@ private func accountInfoEntries(peerView:PeerView, context: AccountContext, acco
         entries.append(.filters(index: index, viewType: .singleItem))
         index += 1
     }
+
+    entries.append(.workspaceProfiles(index: index, viewType: .singleItem))
+    index += 1
     
     if let state = appUpdateState, !context.isSupport {
         entries.append(.update(index: index, viewType: .singleItem, state: AnyUpdateStateEquatable(any: state)))
@@ -1167,6 +1179,10 @@ class AccountViewController : TelegramGenericViewController<AccountControllerVie
                     if let item = tableView.item(stableId: AnyHashable(AccountInfoEntryId.index(14))) {
                         _ = tableView.select(item: item)
                     }
+                case controller.identifier == "workspace_profiles":
+                    if let item = tableView.item(stableId: AnyHashable(AccountInfoEntryId.index(900))) {
+                        _ = tableView.select(item: item)
+                    }
                 case controller.identifier == "notification-settings":
                     if let item = tableView.item(stableId: AnyHashable(AccountInfoEntryId.index(8))) {
                         _ = tableView.select(item: item)
@@ -1274,5 +1290,3 @@ class AccountViewController : TelegramGenericViewController<AccountControllerVie
     }
 
 }
-
-

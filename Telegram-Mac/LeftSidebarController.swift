@@ -110,6 +110,7 @@ final class LeftSidebarView: Control {
     private let borderView = View()
     fileprivate var context: AccountContext?
     fileprivate let edit = ImageButton()
+    fileprivate let profile = TextButton()
     required init(frame frameRect: NSRect) {
         self.visualEffectView = NSVisualEffectView(frame: NSMakeRect(0, 0, frameRect.width, frameRect.height))
         super.init(frame: frameRect)
@@ -119,6 +120,7 @@ final class LeftSidebarView: Control {
 
         addSubview(self.tableView)
         addSubview(self.edit)
+        addSubview(self.profile)
         tableView.getBackgroundColor = {
             return .clear
         }
@@ -154,6 +156,10 @@ final class LeftSidebarView: Control {
         self.edit.set(image: theme.icons.folders_sidebar_edit, for: .Normal)
         self.edit.set(image: theme.icons.folders_sidebar_edit_active, for: .Highlight)
         self.edit.borderColor = theme.colors.grayIcon.withAlphaComponent(0.1)
+        self.profile.set(font: .medium(.text), for: .Normal)
+        self.profile.set(color: theme.colors.text, for: .Normal)
+        self.profile.set(background: .clear, for: .Normal)
+        self.profile.set(background: theme.colors.grayBackground, for: .Highlight)
         needsLayout = true
 
     }
@@ -165,10 +171,12 @@ final class LeftSidebarView: Control {
     override func layout() {
         super.layout()
         self.visualEffectView.frame = bounds
-        self.tableView.frame = NSMakeRect(0, 0, frame.width, frame.height - 50)
+        self.tableView.frame = NSMakeRect(0, 0, frame.width, frame.height - 100)
         self.borderView.frame = NSMakeRect(frame.width - .borderSize, 0, .borderSize, frame.height)
-        self.edit.frame = NSMakeRect(0, frame.height - 50, frame.width, 50)
+        self.edit.frame = NSMakeRect(0, frame.height - 100, frame.width, 50)
+        self.profile.frame = NSMakeRect(0, frame.height - 50, frame.width, 50)
         self.edit.border = tableView.frame.height < tableView.documentSize.height ? [.Top] : []
+        self.profile.border = [.Top]
     }
 }
 
@@ -237,6 +245,7 @@ class LeftSidebarController: TelegramGenericViewController<LeftSidebarView> {
     let updateFilter: (_ f:(FilterData)->FilterData)->Void
     
     private let disposable = MetaDisposable()
+    private let profileDisposable = MetaDisposable()
     
     init(_ context: AccountContext, filterData: Signal<FilterData, NoError>, updateFilter: @escaping(_ f:(FilterData)->FilterData)->Void) {
         self.filterData = filterData
@@ -247,11 +256,13 @@ class LeftSidebarController: TelegramGenericViewController<LeftSidebarView> {
     
     deinit {
         disposable.dispose()
+        profileDisposable.dispose()
     }
     
     override func viewDidLoad() {
         super.viewDidLoad()
         let context = self.context
+        let profileStore = WorkspaceProfileStore.shared(accountId: context.account.id.int64)
         
         genericView.context = context
         
@@ -273,6 +284,28 @@ class LeftSidebarController: TelegramGenericViewController<LeftSidebarView> {
             }
             context.bindings.rootNavigation().push(ChatListFiltersListController(context: context))
         }, for: .Click)
+
+        genericView.profile.contextMenu = {
+            let menu = ContextMenu()
+            let state = profileStore.current
+            for profile in state.profiles {
+                let title = profile.id == state.activeProfileId ? "✓ \(profile.name)" : profile.name
+                menu.addItem(ContextMenuItem(title, handler: {
+                    profileStore.activate(profile.id)
+                }))
+            }
+            menu.addItem(ContextSeparatorItem())
+            menu.addItem(ContextMenuItem("Manage Profiles…", handler: {
+                context.bindings.rootNavigation().push(WorkspaceProfilesController(context: context))
+            }))
+            return menu
+        }
+        genericView.profile.set(handler: { [weak profileButton = genericView.profile] _ in
+            profileButton?.showContextMenu()
+        }, for: .Click)
+        profileDisposable.set((profileStore.signal |> deliverOnMainQueue).start(next: { [weak self] state in
+            self?.genericView.profile.set(text: state.activeProfile.name, for: .Normal)
+        }))
 
         
         let signal: Signal<TableUpdateTransition, NoError> = combineLatest(queue: prepareQueue, filterData, chatListFilterItems(engine: context.engine, accountManager: context.sharedContext.accountManager), appearanceSignal) |> map { filterData, badges, appearance in

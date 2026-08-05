@@ -220,7 +220,7 @@ private final class CodexAssistantActionControl: Control {
     }
 }
 
-private final class CodexAssistantView: View {
+private final class CodexAssistantView: View, NSTextViewDelegate {
     private let logo = ImageView()
     private let titleView = TextView()
     private let statusView = TextView()
@@ -231,7 +231,10 @@ private final class CodexAssistantView: View {
     private let reply = CodexAssistantActionControl(action: .draftReply)
     private let polish = CodexAssistantActionControl(action: .polishDraft)
     private let tasks = CodexAssistantActionControl(action: .actionItems)
-    private let promptField = NSSearchField()
+    private let promptContainer = View()
+    private let promptScroll = NSScrollView()
+    private let promptText = NSTextView()
+    private let promptPlaceholder = TextView()
     private let askButton = TextButton()
     private let responseContainer = View()
     private let responseScroll = NSScrollView()
@@ -239,7 +242,9 @@ private final class CodexAssistantView: View {
     private let progress = ProgressIndicator(frame: NSMakeRect(0, 0, 22, 22))
     private let useButton = TextButton()
     private let copyButton = TextButton()
+    private let newRequestButton = TextButton()
     private var currentAction: CodexAssistantAction?
+    private var canAsk = false
 
     var actionSelected: ((CodexAssistantAction, String?) -> Void)?
     var connectSelected: (() -> Void)?
@@ -258,14 +263,34 @@ private final class CodexAssistantView: View {
         addSubview(reply)
         addSubview(polish)
         addSubview(tasks)
-        addSubview(promptField)
-        addSubview(askButton)
+        addSubview(promptContainer)
         addSubview(responseContainer)
+
+        promptContainer.addSubview(promptScroll)
+        promptContainer.addSubview(promptPlaceholder)
+        promptContainer.addSubview(askButton)
 
         responseContainer.addSubview(responseScroll)
         responseContainer.addSubview(progress)
         responseContainer.addSubview(useButton)
         responseContainer.addSubview(copyButton)
+        responseContainer.addSubview(newRequestButton)
+
+        promptScroll.documentView = promptText
+        promptScroll.drawsBackground = false
+        promptScroll.borderType = .noBorder
+        promptScroll.hasVerticalScroller = true
+        promptScroll.autohidesScrollers = true
+        promptText.delegate = self
+        promptText.isEditable = true
+        promptText.isSelectable = true
+        promptText.drawsBackground = false
+        promptText.isHorizontallyResizable = false
+        promptText.isVerticallyResizable = true
+        promptText.textContainerInset = NSMakeSize(8, 8)
+        promptText.textContainer?.widthTracksTextView = true
+        promptPlaceholder.userInteractionEnabled = false
+        promptPlaceholder.isSelectable = false
 
         responseScroll.documentView = responseText
         responseScroll.drawsBackground = false
@@ -279,13 +304,10 @@ private final class CodexAssistantView: View {
         responseText.textContainer?.widthTracksTextView = true
         responseText.isVerticallyResizable = true
 
-        promptField.placeholderString = "Ask Codex about this chat…"
-        promptField.focusRingType = .none
-
         askButton.scaleOnClick = true
         askButton.set(handler: { [weak self] _ in
             guard let self else { return }
-            let prompt = self.promptField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let prompt = self.promptText.string.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !prompt.isEmpty else { return }
             self.actionSelected?(.custom, prompt)
         }, for: .Click)
@@ -310,6 +332,11 @@ private final class CodexAssistantView: View {
             NSPasteboard.general.setString(value, forType: .string)
         }, for: .Click)
 
+        newRequestButton.scaleOnClick = true
+        newRequestButton.set(handler: { [weak self] _ in
+            self?.showComposer(clear: true, focus: true)
+        }, for: .Click)
+
         for control in [summary, reply, polish, tasks] {
             control.set(handler: { [weak self, weak control] _ in
                 guard let control else { return }
@@ -318,12 +345,16 @@ private final class CodexAssistantView: View {
         }
 
         updateTheme()
-        setResult("Choose an action or ask a question. Codex only receives the recent chat context when you run an action.", action: nil, loading: false)
+        showComposer(clear: false, focus: false)
     }
 
     func updateTheme() {
         self.backgroundColor = theme.colors.background
         separator.backgroundColor = theme.colors.border
+        promptContainer.backgroundColor = theme.colors.grayBackground
+        promptContainer.layer?.cornerRadius = 10
+        promptContainer.layer?.borderWidth = 1
+        promptContainer.layer?.borderColor = theme.colors.border.cgColor
         responseContainer.backgroundColor = theme.colors.grayBackground
         responseContainer.layer?.cornerRadius = 10
         responseContainer.layer?.borderWidth = 1
@@ -344,9 +375,11 @@ private final class CodexAssistantView: View {
             control.updateTheme()
         }
 
-        promptField.backgroundColor = theme.colors.grayBackground
-        promptField.textColor = theme.colors.text
-        promptField.font = .normal(13)
+        promptText.textColor = theme.colors.text
+        promptText.font = .normal(14)
+        let placeholder = TextViewLayout(.initialize(string: "Ask Codex about this chat…", color: theme.colors.grayText, font: .normal(14)))
+        placeholder.measure(width: 300)
+        promptPlaceholder.update(placeholder)
 
         askButton.set(text: "Ask", for: .Normal)
         askButton.set(font: .medium(12), for: .Normal)
@@ -363,6 +396,12 @@ private final class CodexAssistantView: View {
         copyButton.set(font: .medium(12), for: .Normal)
         copyButton.set(color: theme.colors.accent, for: .Normal)
         copyButton.set(background: .clear, for: .Normal)
+
+        newRequestButton.set(text: "New request", for: .Normal)
+        newRequestButton.set(font: .medium(12), for: .Normal)
+        newRequestButton.set(color: theme.colors.accent, for: .Normal)
+        newRequestButton.set(background: .clear, for: .Normal)
+        newRequestButton.sizeToFit(NSMakeSize(10, 10))
 
         responseText.textColor = theme.colors.text
         responseText.font = .normal(12)
@@ -423,20 +462,24 @@ private final class CodexAssistantView: View {
         tasks.isEnabled = connected && enabledFeatures.contains(.chatSummaries)
         reply.isEnabled = connected && enabledFeatures.contains(.replyDrafts)
         polish.isEnabled = connected && enabledFeatures.contains(.replyDrafts)
-        askButton.isEnabled = connected && enabledFeatures.contains(.replyDrafts)
+        canAsk = connected && enabledFeatures.contains(.replyDrafts)
+        promptText.isEditable = canAsk
 
         for control in [summary, reply, polish, tasks] {
             control.layer?.opacity = control.isEnabled ? 1.0 : 0.45
         }
-        askButton.layer?.opacity = askButton.isEnabled ? 1.0 : 0.45
+        updatePromptState()
         needsLayout = true
     }
 
     func setResult(_ text: String, action: CodexAssistantAction?, loading: Bool) {
         currentAction = action
         responseText.string = text
+        promptContainer.isHidden = true
+        responseContainer.isHidden = false
         progress.isHidden = !loading
         responseScroll.isHidden = loading
+        newRequestButton.isHidden = loading
         useButton.isHidden = loading || action == nil || text.isEmpty
         copyButton.isHidden = loading || action == nil || text.isEmpty
         useButton.set(text: action == .draftReply || action == .polishDraft ? "Use draft" : "Add to draft", for: .Normal)
@@ -451,9 +494,37 @@ private final class CodexAssistantView: View {
         }
         currentAction = action
         responseText.string += text
+        promptContainer.isHidden = true
+        responseContainer.isHidden = false
         progress.isHidden = true
         responseScroll.isHidden = false
         responseScroll.contentView.scroll(to: NSMakePoint(0, responseText.bounds.height))
+    }
+
+    private func showComposer(clear: Bool, focus: Bool) {
+        currentAction = nil
+        if clear {
+            promptText.string = ""
+        }
+        responseText.string = ""
+        promptContainer.isHidden = false
+        responseContainer.isHidden = true
+        updatePromptState()
+        needsLayout = true
+        if focus {
+            window?.makeFirstResponder(promptText)
+        }
+    }
+
+    private func updatePromptState() {
+        let isEmpty = promptText.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        promptPlaceholder.isHidden = !isEmpty
+        askButton.isEnabled = canAsk && !isEmpty
+        askButton.layer?.opacity = askButton.isEnabled ? 1.0 : 0.45
+    }
+
+    func textDidChange(_ notification: Notification) {
+        updatePromptState()
     }
 
     override func layout() {
@@ -462,7 +533,7 @@ private final class CodexAssistantView: View {
         logo.setFrameOrigin(NSMakePoint(inset, 14))
         titleView.setFrameOrigin(NSMakePoint(50, 12))
         statusView.setFrameOrigin(NSMakePoint(50, 35))
-        connectButton.centerY(x: frame.width - connectButton.frame.width - inset)
+        connectButton.setFrameOrigin(NSMakePoint(frame.width - connectButton.frame.width - inset, floor((62 - connectButton.frame.height) / 2)))
         separator.frame = NSMakeRect(0, 62, frame.width, 1)
         sectionTitle.setFrameOrigin(NSMakePoint(inset, 76))
 
@@ -473,16 +544,22 @@ private final class CodexAssistantView: View {
         polish.frame = NSMakeRect(inset, 168, cardWidth, 62)
         tasks.frame = NSMakeRect(polish.frame.maxX + gap, 168, cardWidth, 62)
 
-        promptField.frame = NSMakeRect(inset, 244, frame.width - inset * 2 - 62, 34)
-        askButton.frame = NSMakeRect(promptField.frame.maxX + 8, 244, 54, 34)
+        let lowerFrame = NSMakeRect(inset, 244, frame.width - inset * 2, frame.height - 260)
+        promptContainer.frame = lowerFrame
+        promptScroll.frame = NSMakeRect(6, 6, promptContainer.frame.width - 12, promptContainer.frame.height - 54)
+        promptPlaceholder.setFrameOrigin(NSMakePoint(16, 16))
+        askButton.frame = NSMakeRect(promptContainer.frame.width - 66, promptContainer.frame.height - 44, 56, 34)
 
-        responseContainer.frame = NSMakeRect(inset, 292, frame.width - inset * 2, frame.height - 308)
-        let actionsHeight: CGFloat = useButton.isHidden ? 0 : 38
+        responseContainer.frame = lowerFrame
+        let actionsHeight: CGFloat = newRequestButton.isHidden ? 0 : 38
         responseScroll.frame = NSMakeRect(4, 4, responseContainer.frame.width - 8, responseContainer.frame.height - 8 - actionsHeight)
         progress.center()
-        if !useButton.isHidden {
-            useButton.setFrameOrigin(NSMakePoint(responseContainer.frame.width - useButton.frame.width - 10, responseContainer.frame.height - useButton.frame.height - 8))
-            copyButton.setFrameOrigin(NSMakePoint(useButton.frame.minX - copyButton.frame.width - 8, responseContainer.frame.height - copyButton.frame.height - 8))
+        if !newRequestButton.isHidden {
+            newRequestButton.setFrameOrigin(NSMakePoint(10, responseContainer.frame.height - newRequestButton.frame.height - 8))
+            if !useButton.isHidden {
+                useButton.setFrameOrigin(NSMakePoint(responseContainer.frame.width - useButton.frame.width - 10, responseContainer.frame.height - useButton.frame.height - 8))
+                copyButton.setFrameOrigin(NSMakePoint(useButton.frame.minX - copyButton.frame.width - 8, responseContainer.frame.height - copyButton.frame.height - 8))
+            }
         }
     }
 
@@ -558,8 +635,7 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
     private func connectOrOpenSettings() {
         switch currentStatus {
         case .connected, .connecting, .authenticationRequired:
-            chatInteraction.push(WorkspaceProfilesController(context: context))
-            closePopover()
+            openSettings()
             return
         case .disconnected, .failed:
             break
@@ -568,8 +644,7 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
         let state = store.current
         let enabled = WorkspaceAIFeature.allCases.filter { state.activeProfile.isEnabled($0) }
         guard !enabled.isEmpty else {
-            chatInteraction.push(WorkspaceProfilesController(context: context))
-            closePopover()
+            openSettings()
             return
         }
 
@@ -595,6 +670,11 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
                 )
             }
         })
+    }
+
+    private func openSettings() {
+        closePopover()
+        context.bindings.rootNavigation().push(WorkspaceProfilesController(context: context))
     }
 
     private func run(action: CodexAssistantAction, customPrompt: String?) {
@@ -722,6 +802,7 @@ class ChatInputActionsView: View {
     private let suggestPost:ImageButton = ImageButton()
     private let codex:ImageButton = ImageButton()
     private var codexController: CodexAssistantController?
+    private let codexProfileDisposable = MetaDisposable()
 
     private var scheduled:ImageButton?
     
@@ -754,6 +835,7 @@ class ChatInputActionsView: View {
         send.isHidden = true
         voice.isHidden = true
         suggestPost.isHidden = true
+        codex.isHidden = true
         muteChannelMessages.isHidden = true
         slowModeTimeout.isHidden = true
         
@@ -838,6 +920,23 @@ class ChatInputActionsView: View {
         muteChannelMessages.hideAnimated = false
         
         updateLocalizationAndTheme(theme: theme)
+
+        let profileStore = WorkspaceProfileStore.shared(accountId: chatInteraction.context.account.id.int64)
+        codexProfileDisposable.set((profileStore.signal |> deliverOnMainQueue).start(next: { [weak self] state in
+            guard let self else { return }
+            let isVisible = state.activeProfile.isEnabled(.chatSummaries) || state.activeProfile.isEnabled(.replyDrafts)
+            guard self.codex.isHidden == isVisible else { return }
+            self.codex.isHidden = !isVisible
+            if !isVisible {
+                self.codex.popover?.hide()
+                self.codexController = nil
+            }
+            if let inputView = self.superview?.superview as? ChatInputView {
+                inputView.updateLayout(size: inputView.frame.size, transition: .immediate)
+            } else {
+                self.needsLayout = true
+            }
+        }))
     }
     
     override func updateLocalizationAndTheme(theme: PresentationTheme) {
@@ -929,6 +1028,7 @@ class ChatInputActionsView: View {
     }
 
     private func showCodex() {
+        guard !codex.isHidden else { return }
         if codex.popover != nil {
             codex.popover?.hide()
             return
@@ -1261,7 +1361,7 @@ class ChatInputActionsView: View {
         
         let sendValue = self.sendPaidMessages ?? send
         
-        var size:NSSize = NSMakeSize(sendValue.frame.width + iconsInset + entertaiments.frame.width + codex.frame.width, frame.height)
+        var size:NSSize = NSMakeSize(sendValue.frame.width + iconsInset + entertaiments.frame.width + (codex.isHidden ? 0 : codex.frame.width), frame.height)
         
         if value.hasSetDestructiveTimer, value.interfaceState.messageEffect == nil {
             size.width += theme.icons.chatSecretTimer.backingSize.width + iconsInset
@@ -1306,13 +1406,14 @@ class ChatInputActionsView: View {
         transition.updateFrame(view: slowModeTimeout, frame: slowModeTimeout.centerFrameY(x: size.width - slowModeTimeout.frame.width - iconsInset))
         transition.updateFrame(view: entertaiments, frame: entertaiments.centerFrameY(x: sendValue.frame.minX - entertaiments.frame.width))
         transition.updateFrame(view: codex, frame: codex.centerFrameY(x: entertaiments.frame.minX - codex.frame.width))
-        transition.updateFrame(view: keyboard, frame: keyboard.centerFrameY(x: codex.frame.minX - keyboard.frame.width))
-        transition.updateFrame(view: muteChannelMessages, frame: muteChannelMessages.centerFrameY(x: codex.frame.minX - muteChannelMessages.frame.width))
+        let codexOrEntertainment = codex.isHidden ? entertaiments : codex
+        transition.updateFrame(view: keyboard, frame: keyboard.centerFrameY(x: codexOrEntertainment.frame.minX - keyboard.frame.width))
+        transition.updateFrame(view: muteChannelMessages, frame: muteChannelMessages.centerFrameY(x: codexOrEntertainment.frame.minX - muteChannelMessages.frame.width))
 
         
         if let scheduled = scheduled {
             if muteChannelMessages.isHidden {
-                transition.updateFrame(view: scheduled, frame: scheduled.centerFrameY(x: (keyboard.isHidden ? codex.frame.minX : keyboard.frame.minX) - scheduled.frame.width))
+                transition.updateFrame(view: scheduled, frame: scheduled.centerFrameY(x: (keyboard.isHidden ? codexOrEntertainment.frame.minX : keyboard.frame.minX) - scheduled.frame.width))
             } else {
                 transition.updateFrame(view: scheduled, frame: scheduled.centerFrameY(x: muteChannelMessages.frame.minX - scheduled.frame.width - iconsInset))
             }
@@ -1321,10 +1422,10 @@ class ChatInputActionsView: View {
         if let scheduled {
             transition.updateFrame(view: gift, frame: gift.centerFrameY(x: scheduled.frame.minX - gift.frame.width - iconsInset))
         } else {
-            transition.updateFrame(view: gift, frame: gift.centerFrameY(x: (scheduled ?? codex).frame.minX - gift.frame.width))
+            transition.updateFrame(view: gift, frame: gift.centerFrameY(x: (scheduled ?? codexOrEntertainment).frame.minX - gift.frame.width))
         }
         
-        transition.updateFrame(view: suggestPost, frame: suggestPost.centerFrameY(x: codex.frame.minX - suggestPost.frame.width))
+        transition.updateFrame(view: suggestPost, frame: suggestPost.centerFrameY(x: codexOrEntertainment.frame.minX - suggestPost.frame.width))
 
         
         let views = [inlineCancel,
@@ -1358,7 +1459,7 @@ class ChatInputActionsView: View {
     }
     
     deinit {
-        
+        codexProfileDisposable.dispose()
     }
     
     func prepare(with chatInteraction:ChatInteraction) -> Void {

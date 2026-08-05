@@ -267,6 +267,7 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
     private let separator = View()
     private let sectionTitle = TextView()
     private let historyButton = TextButton()
+    private let suggestionsTitle = TextView()
     private let rangeTitle = TextView()
     private let fromTitle = TextView()
     private let toTitle = TextView()
@@ -291,11 +292,14 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
     private var currentAction: CodexAssistantAction?
     private var canAsk = false
     private var historyEntries: [CodexAssistantHistoryEntry] = []
+    private var insightSuggestions: [WorkspaceAISuggestion] = []
+    private var suggestionButtons: [TextButton] = []
 
     var actionSelected: ((CodexAssistantAction, String?) -> Void)?
     var connectSelected: (() -> Void)?
     var useResult: ((String, CodexAssistantAction?) -> Void)?
     var historySelected: ((CodexAssistantHistoryEntry) -> Void)?
+    var insightSuggestionSelected: ((WorkspaceAISuggestion) -> Void)?
 
     var selectedDateRange: ClosedRange<Date> {
         let calendar = Calendar.current
@@ -315,6 +319,7 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         addSubview(separator)
         addSubview(sectionTitle)
         addSubview(historyButton)
+        addSubview(suggestionsTitle)
         addSubview(rangeTitle)
         addSubview(fromTitle)
         addSubview(toTitle)
@@ -454,6 +459,10 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         range.measure(width: 200)
         rangeTitle.update(range)
 
+        let suggestions = TextViewLayout(.initialize(string: "SUGGESTED NEXT STEPS", color: theme.colors.grayText, font: .medium(10)))
+        suggestions.measure(width: 220)
+        suggestionsTitle.update(suggestions)
+
         let from = TextViewLayout(.initialize(string: "From", color: theme.colors.grayText, font: .normal(11)))
         from.measure(width: 40)
         fromTitle.update(from)
@@ -502,6 +511,40 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         responseText.textColor = theme.colors.text
         responseText.font = .normal(12)
         progress.progressColor = theme.colors.accent
+        for button in suggestionButtons {
+            styleSuggestionButton(button)
+        }
+    }
+
+    func updateInsightSuggestions(_ suggestions: [WorkspaceAISuggestion]) {
+        insightSuggestions = Array(suggestions.prefix(3))
+        for button in suggestionButtons {
+            button.removeFromSuperview()
+        }
+        suggestionButtons = insightSuggestions.map { [weak self] suggestion in
+            let button = TextButton()
+            button.scaleOnClick = true
+            button.set(text: suggestion.title, for: .Normal)
+            self?.styleSuggestionButton(button)
+            button.set(handler: { [weak self] _ in
+                self?.insightSuggestionSelected?(suggestion)
+            }, for: .Click)
+            self?.addSubview(button)
+            return button
+        }
+        suggestionsTitle.isHidden = suggestionButtons.isEmpty
+        needsLayout = true
+    }
+
+    private func styleSuggestionButton(_ button: TextButton) {
+        button.set(font: .medium(11), for: .Normal)
+        button.set(color: theme.colors.accent, for: .Normal)
+        button.set(background: theme.colors.grayBackground, for: .Normal)
+        button.layer?.cornerRadius = 8
+        button.layer?.borderWidth = 1
+        button.layer?.borderColor = theme.colors.border.cgColor
+        button.sizeToFit(NSMakeSize(16, 10))
+        button.setFrameSize(NSMakeSize(min(button.frame.width, 150), 30))
     }
 
     func updateHistory(_ entries: [CodexAssistantHistoryEntry]) {
@@ -694,7 +737,21 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         polish.frame = NSMakeRect(inset, 226, cardWidth, 62)
         tasks.frame = NSMakeRect(polish.frame.maxX + gap, 226, cardWidth, 62)
 
-        let lowerFrame = NSMakeRect(inset, 304, frame.width - inset * 2, frame.height - 320)
+        var lowerY: CGFloat = 304
+        if !suggestionButtons.isEmpty {
+            suggestionsTitle.setFrameOrigin(NSMakePoint(inset, 300))
+            var x = inset
+            for button in suggestionButtons {
+                let available = max(70, frame.width - inset - x)
+                button.isHidden = x >= frame.width - inset
+                guard !button.isHidden else { continue }
+                button.setFrameSize(NSMakeSize(min(button.frame.width, available), 30))
+                button.setFrameOrigin(NSMakePoint(x, 316))
+                x = button.frame.maxX + 6
+            }
+            lowerY = 352
+        }
+        let lowerFrame = NSMakeRect(inset, lowerY, frame.width - inset * 2, frame.height - lowerY - 16)
         promptContainer.frame = lowerFrame
         promptScroll.frame = NSMakeRect(6, 6, promptContainer.frame.width - 12, promptContainer.frame.height - 54)
         promptPlaceholder.setFrameOrigin(NSMakePoint(16, 16))
@@ -726,6 +783,7 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
     private let historyStore: CodexAssistantHistoryStore
     private let statusDisposable = MetaDisposable()
     private let historyDisposable = MetaDisposable()
+    private let insightDisposable = MetaDisposable()
     private var activeAction: CodexAssistantAction?
     private var activeJobId: UUID?
     private var response = ""
@@ -757,6 +815,16 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
         genericView.historySelected = { [weak self] entry in
             self?.genericView.showHistoryEntry(entry)
         }
+        genericView.insightSuggestionSelected = { [weak self] suggestion in
+            guard let self else { return }
+            if let text = suggestion.proposedText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                self.chatInteraction.updateInput(with: text)
+                self.chatInteraction.focusInputField()
+                self.closePopover()
+            } else {
+                self.run(action: .custom, customPrompt: suggestion.detail)
+            }
+        }
         genericView.connectSelected = { [weak self] in
             self?.connectOrOpenSettings()
         }
@@ -777,6 +845,15 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
             let enabled = Set(WorkspaceAIFeature.allCases.filter { state.activeProfile.isEnabled($0) })
             self?.currentStatus = status
             self?.genericView.update(status: status, enabledFeatures: enabled)
+        }))
+
+        insightDisposable.set((combineLatest(workspaceAIState(postbox: context.account.postbox), store.signal) |> deliverOnMainQueue).start(next: { [weak self] aiState, profileState in
+            guard let self else { return }
+            let suggestions = aiState.insights
+                .filter { $0.profileId == profileState.activeProfile.id && $0.peerId == self.chatInteraction.peerId.toInt64() && !$0.isReviewed }
+                .sorted(by: { $0.generatedAt > $1.generatedAt })
+                .first?.suggestions ?? []
+            self.genericView.updateInsightSuggestions(suggestions)
         }))
 
         genericView.updateHistory(historyStore.entries)
@@ -997,6 +1074,7 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
         }
         statusDisposable.dispose()
         historyDisposable.dispose()
+        insightDisposable.dispose()
     }
 }
 

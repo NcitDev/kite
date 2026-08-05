@@ -409,16 +409,59 @@ fileprivate enum ChatListSearchEntry: Comparable, Identifiable {
     }
 }
 
-/// Global search has several independent local and remote producers. Apply the workspace
-/// allowlist after they are merged so channels, apps, media, cached rows, and suggestions
-/// cannot bypass profile isolation. An empty Profile Chats list keeps legacy unrestricted
-/// behavior; choosing at least one chat turns the list into a strict allowlist.
+private enum WorkspaceSearchScope: Equatable {
+    case unrestricted
+    case allowed(Set<PeerId>, profileName: String)
+}
+
+/// Resolve accepted Telegram folders through their real chat-list predicates. This preserves
+/// folder rules such as categories, explicit inclusions/exclusions, muted/read state, and archive.
+private func workspaceSearchScope(context: AccountContext) -> Signal<WorkspaceSearchScope, NoError> {
+    let profiles = WorkspaceProfileStore.shared(accountId: context.account.id.int64)
+    return combineLatest(profiles.signal, chatListFilterPreferences(engine: context.engine))
+    |> mapToSignal { state, filters -> Signal<WorkspaceSearchScope, NoError> in
+        let profile = state.activeProfile
+        if profile.showsAllFolders {
+            return .single(.unrestricted)
+        }
+
+        let selectedFilters = filters.list.filter { profile.visibleFolderIds.contains($0.id) }
+        if selectedFilters.contains(where: { $0.isAllChats }) {
+            return .single(.unrestricted)
+        }
+
+        let explicitlyIncluded = Set(profile.includedPeerIds.map(PeerId.init))
+        let folderViews: [Signal<Set<PeerId>, NoError>] = selectedFilters.map { acceptedFilter in
+            return chatListViewForLocation(
+                chatListLocation: .chatList(groupId: .root),
+                location: .Initial(10_000, nil),
+                filter: acceptedFilter,
+                account: context.account
+            )
+            |> filter { !$0.list.isLoading }
+            |> map { update in
+                return Set(update.list.items.map { $0.renderedPeer.peerId })
+            }
+        }
+        guard !folderViews.isEmpty else {
+            return .single(.allowed(explicitlyIncluded, profileName: profile.name))
+        }
+        return combineLatest(folderViews) |> map { folderPeerIds in
+            let allowed = folderPeerIds.reduce(into: explicitlyIncluded) { result, ids in
+                result.formUnion(ids)
+            }
+            return .allowed(allowed, profileName: profile.name)
+        }
+    }
+}
+
+/// Global search has several independent local and remote producers. Apply the resolved scope
+/// after they are merged so channels, apps, media, cached rows, and suggestions cannot bypass it.
 private func workspaceFilteredSearchEntries(
     _ entries: [ChatListSearchEntry],
-    profile: WorkspaceProfile
+    scope: WorkspaceSearchScope
 ) -> [ChatListSearchEntry] {
-    let allowedPeerIds = Set(profile.includedPeerIds.map(PeerId.init))
-    guard !allowedPeerIds.isEmpty else {
+    guard case let .allowed(allowedPeerIds, profileName) = scope else {
         return entries
     }
 
@@ -466,7 +509,19 @@ private func workspaceFilteredSearchEntries(
         case .foundStories:
             // StoryListContext.State is an opaque aggregate and cannot be filtered safely.
             return nil
-        case .separator, .emptySearch, .emptyList, .disclaimer:
+        case let .separator(text, index, state):
+            if index == 20_000, case let .dropdown(_, actions) = state {
+                let scopedActions = actions.enumerated().map { actionIndex, action in
+                    return SeparatorBlockState.DropdownAction(
+                        title: actionIndex == 0 ? "\(profileName) Chats" : action.title,
+                        selected: action.selected,
+                        action: action.action
+                    )
+                }
+                return .separator(text: text, index: index, state: .dropdown("From \(profileName)", scopedActions))
+            }
+            return entry
+        case .emptySearch, .emptyList, .disclaimer:
             return entry
         }
     }
@@ -1836,9 +1891,8 @@ class SearchController: GenericViewController<TableView>,TableViewDelegate {
         }
         
         
-        let workspaceProfile = WorkspaceProfileStore.shared(accountId: context.account.id.int64).signal |> map { $0.activeProfile }
-        let profileFilteredSearchItems = combineLatest(searchItems, workspaceProfile) |> map { value, profile in
-            return (workspaceFilteredSearchEntries(value.0, profile: profile), value.1, value.2, value.3, value.4)
+        let profileFilteredSearchItems = combineLatest(searchItems, workspaceSearchScope(context: context)) |> map { value, scope in
+            return (workspaceFilteredSearchEntries(value.0, scope: scope), value.1, value.2, value.3, value.4)
         }
 
         let transition = combineLatest(queue: prepareQueue, profileFilteredSearchItems, appearanceSignal, context.globalPeerHandler.get() |> distinctUntilChanged, pinnedPromise.get()) |> map { value, appearance, location, pinnedItems in

@@ -80,6 +80,8 @@ struct WorkspaceProfile: Codable, Equatable {
     var knowledgeIntegrations: [WorkspaceKnowledgeIntegration]
     /// How far back the in-chat panel looks once "Today" is cleared.
     var chatRangePreset: WorkspaceChatRangePreset
+    /// Per-action model override, keyed by action. Missing means "use the profile's model".
+    var actionModels: [String: String]
     /// Optional on-device speech-to-text server, used instead of Telegram's Premium transcription.
     var localTranscription: WorkspaceLocalTranscription
 
@@ -90,6 +92,12 @@ struct WorkspaceProfile: Codable, Equatable {
     /// The single switch that decides whether an action appears in the in-chat panel.
     func isEnabled(_ action: CodexAssistantAction) -> Bool {
         return featureFlags[action.flagKey] ?? action.isEnabledByDefault
+    }
+
+    /// Model this action should run on: its own override when set, otherwise the profile's.
+    func resolvedModel(for action: CodexAssistantAction, default defaultModel: String) -> String {
+        let override = actionModels[action.rawValue] ?? ""
+        return override.isEmpty ? defaultModel : override
     }
 
     /// Capabilities announced to the agent are derived from the actions actually switched on,
@@ -114,6 +122,7 @@ extension WorkspaceProfile {
         case featureFlags
         case knowledgeIntegrations
         case chatRangePreset
+        case actionModels
         case localTranscription
     }
 
@@ -130,6 +139,7 @@ extension WorkspaceProfile {
         self.featureFlags = try container.decodeIfPresent([String: Bool].self, forKey: .featureFlags) ?? [:]
         self.knowledgeIntegrations = try container.decodeIfPresent([WorkspaceKnowledgeIntegration].self, forKey: .knowledgeIntegrations) ?? []
         self.chatRangePreset = try container.decodeIfPresent(WorkspaceChatRangePreset.self, forKey: .chatRangePreset) ?? .sevenDays
+        self.actionModels = try container.decodeIfPresent([String: String].self, forKey: .actionModels) ?? [:]
         self.localTranscription = try container.decodeIfPresent(WorkspaceLocalTranscription.self, forKey: .localTranscription) ?? .defaultValue
     }
 
@@ -146,6 +156,7 @@ extension WorkspaceProfile {
         try container.encode(featureFlags, forKey: .featureFlags)
         try container.encode(knowledgeIntegrations, forKey: .knowledgeIntegrations)
         try container.encode(chatRangePreset, forKey: .chatRangePreset)
+        try container.encode(actionModels, forKey: .actionModels)
         try container.encode(localTranscription, forKey: .localTranscription)
     }
 }
@@ -336,6 +347,7 @@ struct WorkspaceProfileState: Codable, Equatable {
             featureFlags: [:],
             knowledgeIntegrations: [],
             chatRangePreset: .sevenDays,
+            actionModels: [:],
             localTranscription: .defaultValue
         )
         let home = WorkspaceProfile(
@@ -350,6 +362,7 @@ struct WorkspaceProfileState: Codable, Equatable {
             featureFlags: [:],
             knowledgeIntegrations: [],
             chatRangePreset: .sevenDays,
+            actionModels: [:],
             localTranscription: .defaultValue
         )
         return WorkspaceProfileState(
@@ -448,6 +461,7 @@ final class WorkspaceProfileStore {
                 featureFlags: [:],
                 knowledgeIntegrations: [],
                 chatRangePreset: .sevenDays,
+            actionModels: [:],
             localTranscription: .defaultValue
             )
             state.profiles.append(profile)
@@ -1256,6 +1270,10 @@ enum WorkspaceMessageSender {
 private let workspaceProfileNameId = InputDataIdentifier("workspace.profile.name")
 private let workspaceACPExecutableId = InputDataIdentifier("workspace.acp.executable")
 private let workspaceACPModelId = InputDataIdentifier("workspace.acp.model")
+
+private func workspaceActionModelId(_ action: CodexAssistantAction) -> InputDataIdentifier {
+    return InputDataIdentifier("workspace.action.model.\(action.rawValue)")
+}
 private let workspaceTranscriptionEndpointId = InputDataIdentifier("workspace.transcription.endpoint")
 private let workspaceTranscriptionModelId = InputDataIdentifier("workspace.transcription.model")
 private let workspaceACPArgumentsId = InputDataIdentifier("workspace.acp.arguments")
@@ -1365,6 +1383,11 @@ private func workspaceProfileEntries(
         }
     }
 
+    /// Models offered anywhere in this screen: what the agent reported, else the known list.
+    let offeredModels = !acpModels.isEmpty
+        ? acpModels
+        : state.acp.provider.suggestedModels.map { WorkspaceACPModel(id: $0, name: $0) }
+
     entries.append(.sectionId(sectionId, type: .normal))
     sectionId += 1
     entries.append(.desc(sectionId: sectionId, index: index, text: .plain("CHAT ACTIONS"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
@@ -1404,6 +1427,29 @@ private func workspaceProfileEntries(
     index += 1
     entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Which buttons appear in the agent panel inside a chat, and how far back it looks when you clear the Today checkbox. Voice to text and Generate image are off until you turn them on."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
     index += 1
+
+    /// Only actions that actually run through the agent can pick a model.
+    let modelledActions = chatActions.filter { active.isEnabled($0) && $0.requiresAgent }
+    if !modelledActions.isEmpty {
+        entries.append(.sectionId(sectionId, type: .normal))
+        sectionId += 1
+        entries.append(.desc(sectionId: sectionId, index: index, text: .plain("MODEL PER ACTION"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
+        index += 1
+        for (position, chatAction) in modelledActions.enumerated() {
+            let current = active.actionModels[chatAction.rawValue] ?? ""
+            var values: [ValuesSelectorValue<InputDataValue>] = [
+                ValuesSelectorValue(localized: "Same as agent", value: .string(""))
+            ]
+            values.append(contentsOf: offeredModels.map { ValuesSelectorValue(localized: $0.name, value: .string($0.id)) })
+            if !current.isEmpty, !offeredModels.contains(where: { $0.id == current }) {
+                values.append(ValuesSelectorValue(localized: current, value: .string(current)))
+            }
+            entries.append(.selector(sectionId: sectionId, index: index, value: .string(current), error: nil, identifier: workspaceActionModelId(chatAction), placeholder: chatAction.title, viewType: bestGeneralViewType(modelledActions, for: position), values: values))
+            index += 1
+        }
+        entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Run individual actions on a different model — a cheap one for summaries, a stronger one for replies. \"Same as agent\" uses the model set above. The agent is switched to the chosen model just before the action runs."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
+        index += 1
+    }
 
     if active.isEnabled(.voiceToText) {
         entries.append(.sectionId(sectionId, type: .normal))
@@ -1541,18 +1587,14 @@ private func workspaceProfileEntries(
     index += 1
     entries.append(.input(sectionId: sectionId, index: index, value: .string(state.acp.workingDirectory), error: nil, identifier: workspaceACPDirectoryId, mode: .plain, data: .init(viewType: .innerItem), placeholder: InputDataInputPlaceholder("Folder"), inputPlaceholder: "Working directory", filter: { $0 }, limit: 2048))
     index += 1
-    /// Prefer what the connected agent reported; fall back to the provider's known list.
-    let offered = !acpModels.isEmpty
-        ? acpModels
-        : state.acp.provider.suggestedModels.map { WorkspaceACPModel(id: $0, name: $0) }
     /// While connected the agent's own current model wins; otherwise show what will be requested.
     let effectiveModel = acpCurrentModel.isEmpty ? state.acp.model : acpCurrentModel
     var modelValues: [ValuesSelectorValue<InputDataValue>] = [
         ValuesSelectorValue(localized: "Agent default", value: .string(""))
     ]
-    modelValues.append(contentsOf: offered.map { ValuesSelectorValue(localized: $0.name, value: .string($0.id)) })
+    modelValues.append(contentsOf: offeredModels.map { ValuesSelectorValue(localized: $0.name, value: .string($0.id)) })
     /// A model the agent has since stopped listing must still be shown as the current choice.
-    if !effectiveModel.isEmpty, !offered.contains(where: { $0.id == effectiveModel }) {
+    if !effectiveModel.isEmpty, !offeredModels.contains(where: { $0.id == effectiveModel }) {
         modelValues.append(ValuesSelectorValue(localized: effectiveModel, value: .string(effectiveModel)))
     }
     entries.append(.selector(sectionId: sectionId, index: index, value: .string(effectiveModel), error: nil, identifier: workspaceACPModelId, placeholder: "Model", viewType: .lastItem, values: modelValues))
@@ -1657,6 +1699,17 @@ func WorkspaceProfilesController(context: AccountContext) -> InputDataController
             }
             if let directory = data[workspaceACPDirectoryId]?.stringValue, !directory.isEmpty {
                 configuration.workingDirectory = directory
+            }
+        }
+        store.updateActive { profile in
+            for chatAction in CodexAssistantAction.configurable {
+                guard let value = data[workspaceActionModelId(chatAction)]?.stringValue else { continue }
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty {
+                    profile.actionModels.removeValue(forKey: chatAction.rawValue)
+                } else {
+                    profile.actionModels[chatAction.rawValue] = trimmed
+                }
             }
         }
         if let model = data[workspaceACPModelId]?.stringValue, model != store.current.acp.model {

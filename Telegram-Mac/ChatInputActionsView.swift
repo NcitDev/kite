@@ -1434,6 +1434,15 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
         let dateRange = genericView.selectedDateRange
         session.present(.running(action: action, text: "Thinking…"))
 
+        /// Point the live session at this action's model before the prompt goes out. Both calls
+        /// queue on the client's serial queue, so set_model always precedes session/prompt.
+        if action.requiresAgent {
+            let model = profile.resolvedModel(for: action, default: store.current.acp.model)
+            if !model.isEmpty {
+                client.selectModel(model)
+            }
+        }
+
         if action == .voiceToText {
             transcribeVoiceMessages(in: dateRange)
             return

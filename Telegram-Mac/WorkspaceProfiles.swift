@@ -80,8 +80,6 @@ struct WorkspaceProfile: Codable, Equatable {
     var knowledgeIntegrations: [WorkspaceKnowledgeIntegration]
     /// How far back the in-chat panel looks once "Today" is cleared.
     var chatRangePreset: WorkspaceChatRangePreset
-    /// Per-action model override, keyed by action. Missing means "use the profile's model".
-    var actionModels: [String: String]
     /// Optional on-device speech-to-text server, used instead of Telegram's Premium transcription.
     var localTranscription: WorkspaceLocalTranscription
 
@@ -92,12 +90,6 @@ struct WorkspaceProfile: Codable, Equatable {
     /// The single switch that decides whether an action appears in the in-chat panel.
     func isEnabled(_ action: CodexAssistantAction) -> Bool {
         return featureFlags[action.flagKey] ?? action.isEnabledByDefault
-    }
-
-    /// Model this action should run on: its own override when set, otherwise the profile's.
-    func resolvedModel(for action: CodexAssistantAction, default defaultModel: String) -> String {
-        let override = actionModels[action.rawValue] ?? ""
-        return override.isEmpty ? defaultModel : override
     }
 
     /// Capabilities announced to the agent are derived from the actions actually switched on,
@@ -122,7 +114,6 @@ extension WorkspaceProfile {
         case featureFlags
         case knowledgeIntegrations
         case chatRangePreset
-        case actionModels
         case localTranscription
     }
 
@@ -139,7 +130,6 @@ extension WorkspaceProfile {
         self.featureFlags = try container.decodeIfPresent([String: Bool].self, forKey: .featureFlags) ?? [:]
         self.knowledgeIntegrations = try container.decodeIfPresent([WorkspaceKnowledgeIntegration].self, forKey: .knowledgeIntegrations) ?? []
         self.chatRangePreset = try container.decodeIfPresent(WorkspaceChatRangePreset.self, forKey: .chatRangePreset) ?? .sevenDays
-        self.actionModels = try container.decodeIfPresent([String: String].self, forKey: .actionModels) ?? [:]
         self.localTranscription = try container.decodeIfPresent(WorkspaceLocalTranscription.self, forKey: .localTranscription) ?? .defaultValue
     }
 
@@ -156,7 +146,6 @@ extension WorkspaceProfile {
         try container.encode(featureFlags, forKey: .featureFlags)
         try container.encode(knowledgeIntegrations, forKey: .knowledgeIntegrations)
         try container.encode(chatRangePreset, forKey: .chatRangePreset)
-        try container.encode(actionModels, forKey: .actionModels)
         try container.encode(localTranscription, forKey: .localTranscription)
     }
 }
@@ -226,6 +215,14 @@ struct WorkspaceACPConfiguration: Codable, Equatable {
     var autoConnect: Bool
     /// Empty means "let the agent pick"; otherwise appended to the launch arguments.
     var model: String
+    /// Per-action model override. Lives here because model ids are agent-specific.
+    var actionModels: [String: String]
+
+    /// Model an action should run on: its own override when set, otherwise this agent's model.
+    func resolvedModel(for action: CodexAssistantAction) -> String {
+        let override = actionModels[action.rawValue] ?? ""
+        return override.isEmpty ? model : override
+    }
 
     static var defaultValue: WorkspaceACPConfiguration {
         return WorkspaceACPConfiguration(
@@ -234,7 +231,8 @@ struct WorkspaceACPConfiguration: Codable, Equatable {
             arguments: WorkspaceACPProvider.codex.defaultArguments,
             workingDirectory: NSHomeDirectory(),
             autoConnect: true,
-            model: WorkspaceACPProvider.codex.defaultModel
+            model: WorkspaceACPProvider.codex.defaultModel,
+            actionModels: [:]
         )
     }
 
@@ -268,15 +266,17 @@ struct WorkspaceACPConfiguration: Codable, Equatable {
         case workingDirectory
         case autoConnect
         case model
+        case actionModels
     }
 
-    init(provider: WorkspaceACPProvider, executable: String, arguments: [String], workingDirectory: String, autoConnect: Bool, model: String) {
+    init(provider: WorkspaceACPProvider, executable: String, arguments: [String], workingDirectory: String, autoConnect: Bool, model: String, actionModels: [String: String]) {
         self.provider = provider
         self.executable = executable
         self.arguments = arguments
         self.workingDirectory = workingDirectory
         self.autoConnect = autoConnect
         self.model = model
+        self.actionModels = actionModels
     }
 
     init(from decoder: Decoder) throws {
@@ -303,7 +303,8 @@ struct WorkspaceACPConfiguration: Codable, Equatable {
             arguments: arguments,
             workingDirectory: try container.decode(String.self, forKey: .workingDirectory),
             autoConnect: try container.decodeIfPresent(Bool.self, forKey: .autoConnect) ?? true,
-            model: try container.decodeIfPresent(String.self, forKey: .model) ?? provider.defaultModel
+            model: try container.decodeIfPresent(String.self, forKey: .model) ?? provider.defaultModel,
+            actionModels: try container.decodeIfPresent([String: String].self, forKey: .actionModels) ?? [:]
         )
     }
 }
@@ -332,7 +333,10 @@ struct WorkspaceProfileState: Codable, Equatable {
     var schemaVersion: Int
     var activeProfileId: String
     var profiles: [WorkspaceProfile]
+    /// The agent currently in use.
     var acp: WorkspaceACPConfiguration
+    /// One saved setup per agent, so switching agents restores rather than resets.
+    var acpProfiles: [String: WorkspaceACPConfiguration]
 
     static var defaultValue: WorkspaceProfileState {
         let work = WorkspaceProfile(
@@ -347,7 +351,6 @@ struct WorkspaceProfileState: Codable, Equatable {
             featureFlags: [:],
             knowledgeIntegrations: [],
             chatRangePreset: .sevenDays,
-            actionModels: [:],
             localTranscription: .defaultValue
         )
         let home = WorkspaceProfile(
@@ -362,19 +365,63 @@ struct WorkspaceProfileState: Codable, Equatable {
             featureFlags: [:],
             knowledgeIntegrations: [],
             chatRangePreset: .sevenDays,
-            actionModels: [:],
             localTranscription: .defaultValue
         )
         return WorkspaceProfileState(
             schemaVersion: 3,
             activeProfileId: work.id,
             profiles: [work, home],
-            acp: .defaultValue
+            acp: .defaultValue,
+            acpProfiles: [:]
         )
+    }
+
+    /// Saves the agent in use, then swaps in the saved setup for `provider` — creating a fresh
+    /// one from that provider's defaults the first time it is selected.
+    mutating func selectACPProvider(_ provider: WorkspaceACPProvider) {
+        guard provider != acp.provider else { return }
+        acpProfiles[acp.provider.rawValue] = acp
+        let autoConnect = acp.autoConnect
+        let workingDirectory = acp.workingDirectory
+        if var saved = acpProfiles[provider.rawValue] {
+            saved.autoConnect = autoConnect
+            acp = saved
+        } else {
+            var fresh = WorkspaceACPConfiguration.defaultValue
+            fresh.selectProvider(provider)
+            fresh.autoConnect = autoConnect
+            fresh.workingDirectory = workingDirectory
+            acp = fresh
+        }
     }
 
     var activeProfile: WorkspaceProfile {
         return profiles.first(where: { $0.id == activeProfileId }) ?? profiles.first ?? WorkspaceProfileState.defaultValue.profiles[0]
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case activeProfileId
+        case profiles
+        case acp
+        case acpProfiles
+    }
+
+    init(schemaVersion: Int, activeProfileId: String, profiles: [WorkspaceProfile], acp: WorkspaceACPConfiguration, acpProfiles: [String: WorkspaceACPConfiguration]) {
+        self.schemaVersion = schemaVersion
+        self.activeProfileId = activeProfileId
+        self.profiles = profiles
+        self.acp = acp
+        self.acpProfiles = acpProfiles
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 3
+        self.activeProfileId = try container.decode(String.self, forKey: .activeProfileId)
+        self.profiles = try container.decode([WorkspaceProfile].self, forKey: .profiles)
+        self.acp = try container.decodeIfPresent(WorkspaceACPConfiguration.self, forKey: .acp) ?? .defaultValue
+        self.acpProfiles = try container.decodeIfPresent([String: WorkspaceACPConfiguration].self, forKey: .acpProfiles) ?? [:]
     }
 }
 
@@ -461,7 +508,6 @@ final class WorkspaceProfileStore {
                 featureFlags: [:],
                 knowledgeIntegrations: [],
                 chatRangePreset: .sevenDays,
-            actionModels: [:],
             localTranscription: .defaultValue
             )
             state.profiles.append(profile)
@@ -490,6 +536,12 @@ final class WorkspaceProfileStore {
     func updateACP(_ transform: (inout WorkspaceACPConfiguration) -> Void) {
         update { state in
             transform(&state.acp)
+        }
+    }
+
+    func selectACPProvider(_ provider: WorkspaceACPProvider) {
+        update { state in
+            state.selectACPProvider(provider)
         }
     }
 
@@ -1436,7 +1488,7 @@ private func workspaceProfileEntries(
         entries.append(.desc(sectionId: sectionId, index: index, text: .plain("MODEL PER ACTION"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
         index += 1
         for (position, chatAction) in modelledActions.enumerated() {
-            let current = active.actionModels[chatAction.rawValue] ?? ""
+            let current = state.acp.actionModels[chatAction.rawValue] ?? ""
             var values: [ValuesSelectorValue<InputDataValue>] = [
                 ValuesSelectorValue(localized: "Same as agent", value: .string(""))
             ]
@@ -1571,7 +1623,7 @@ private func workspaceProfileEntries(
             viewType: bestGeneralViewType(providers, for: position),
             action: {
                 client.disconnect()
-                store.updateACP { $0.selectProvider(provider) }
+                store.selectACPProvider(provider)
             }
         )))
         index += 1
@@ -1701,14 +1753,14 @@ func WorkspaceProfilesController(context: AccountContext) -> InputDataController
                 configuration.workingDirectory = directory
             }
         }
-        store.updateActive { profile in
+        store.updateACP { configuration in
             for chatAction in CodexAssistantAction.configurable {
                 guard let value = data[workspaceActionModelId(chatAction)]?.stringValue else { continue }
                 let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                 if trimmed.isEmpty {
-                    profile.actionModels.removeValue(forKey: chatAction.rawValue)
+                    configuration.actionModels.removeValue(forKey: chatAction.rawValue)
                 } else {
-                    profile.actionModels[chatAction.rawValue] = trimmed
+                    configuration.actionModels[chatAction.rawValue] = trimmed
                 }
             }
         }

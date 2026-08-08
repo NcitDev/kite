@@ -1437,7 +1437,7 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
         /// Point the live session at this action's model before the prompt goes out. Both calls
         /// queue on the client's serial queue, so set_model always precedes session/prompt.
         if action.requiresAgent {
-            let model = profile.resolvedModel(for: action, default: store.current.acp.model)
+            let model = store.current.acp.resolvedModel(for: action)
             if !model.isEmpty {
                 client.selectModel(model)
             }

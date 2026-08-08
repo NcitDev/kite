@@ -1,4 +1,4 @@
-# TelegramWork agent instructions
+# Kite agent instructions
 
 ## Knowledge integrations
 

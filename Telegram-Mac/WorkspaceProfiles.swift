@@ -1021,7 +1021,7 @@ final class WorkspaceACPClient {
                 "protocolVersion": 1,
                 "clientCapabilities": [
                     "_meta": [
-                        "dev.telegramwork/aiFeatures": enabledFeatures.map { feature in
+                        "dev.kiteapp/aiFeatures": enabledFeatures.map { feature in
                             [
                                 "id": feature.rawValue,
                                 "title": feature.title,
@@ -1031,8 +1031,8 @@ final class WorkspaceACPClient {
                     ]
                 ],
                 "clientInfo": [
-                    "name": "telegramwork-mac",
-                    "title": "TelegramWork for macOS",
+                    "name": "kite-mac",
+                    "title": "Kite for macOS",
                     "version": APP_VERSION_STRING
                 ]
             ]) { [weak self] response in
@@ -1182,7 +1182,7 @@ final class WorkspaceACPClient {
     }
 
     private func mcpServersForActiveIntegrations() -> [[String: Any]] {
-        guard let scriptPath = Bundle.main.path(forResource: "telegramwork_knowledge_mcp", ofType: "py") else {
+        guard let scriptPath = Bundle.main.path(forResource: "kite_knowledge_mcp", ofType: "py") else {
             return []
         }
         return knowledgeIntegrations.compactMap { integration in
@@ -1576,7 +1576,7 @@ private func workspaceProfileEntries(
     entries.append(.desc(sectionId: sectionId, index: index, text: .plain("KNOWLEDGE INTEGRATIONS"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
     index += 1
     if active.knowledgeIntegrations.isEmpty {
-        entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Connect local knowledge to this profile. Add a vault, provide its folder path and plain-language instructions, and TelegramWork configures both local retrieval and agent tools."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
+        entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Connect local knowledge to this profile. Add a vault, provide its folder path and plain-language instructions, and Kite configures both local retrieval and agent tools."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
         index += 1
     }
     for integration in active.knowledgeIntegrations {
@@ -1693,9 +1693,9 @@ private func workspaceProfileEntries(
     index += 1
     let acpHint: String
     if state.acp.provider == .custom {
-        acpHint = "The program TelegramWork starts to run this agent, the folder it treats as its project root, and the model to request. Enter the command for your own ACP agent here. The model list is read from the agent once it connects."
+        acpHint = "The program Kite starts to run this agent, the folder it treats as its project root, and the model to request. Enter the command for your own ACP agent here. The model list is read from the agent once it connects."
     } else {
-        acpHint = "The program TelegramWork starts to run \(state.acp.provider.title), the folder it treats as its project root, and the model to request. The model list is read from the agent once it connects; the rest is filled in for you."
+        acpHint = "The program Kite starts to run \(state.acp.provider.title), the folder it treats as its project root, and the model to request. The model list is read from the agent once it connects; the rest is filled in for you."
     }
     entries.append(.desc(sectionId: sectionId, index: index, text: .plain(acpHint), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
     index += 1

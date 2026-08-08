@@ -117,7 +117,7 @@ final class WorkspaceVoiceTranscriber {
         settings: WorkspaceLocalTranscription,
         completion: @escaping (Result<String, WorkspaceTranscriptionError>) -> Void
     ) {
-        let boundary = "telegramwork-\(UUID().uuidString)"
+        let boundary = "kite-\(UUID().uuidString)"
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")

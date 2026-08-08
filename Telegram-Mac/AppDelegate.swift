@@ -365,6 +365,7 @@ class AppDelegate: NSResponder, NSApplicationDelegate, NSUserNotificationCenterD
 //        window.addTitlebarAccessoryViewController(titleBarAccessoryViewController)
         
         appDelegate = self
+        ApiEnvironment.migrateFromLegacyBundleId()
         ApiEnvironment.migrate()
         
         initializeSelectManager()

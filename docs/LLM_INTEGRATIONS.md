@@ -1,6 +1,6 @@
 # Adding knowledge integrations
 
-TelegramWork uses one profile-scoped integration record to configure both in-app retrieval and agent tools. The first provider is Obsidian, represented by a local Markdown vault.
+Kite uses one profile-scoped integration record to configure both in-app retrieval and agent tools. The first provider is Obsidian, represented by a local Markdown vault.
 
 ## User contract
 
@@ -21,7 +21,7 @@ Changing a tool-exposed integration disconnects the current ACP session. The nex
 - `WorkspaceProfile.knowledgeIntegrations` enforces profile isolation and backward-compatible decoding.
 - `WorkspaceKnowledgeRetriever` performs bounded local retrieval for composer requests.
 - `WorkspaceACPClient.mcpServersForActiveIntegrations()` converts the same records into ACP `session/new` MCP entries.
-- `telegramwork_knowledge_mcp.py` is the bundled read-only MCP adapter for local Markdown.
+- `kite_knowledge_mcp.py` is the bundled read-only MCP adapter for local Markdown.
 - `CodexAssistantController` marks chat and retrieved knowledge as untrusted quoted data and preserves source paths.
 
 ## Recipe for a new provider
@@ -51,4 +51,4 @@ It has no write, edit, move, delete, shell, or network tools. Paths are resolved
 - Verify path traversal and symlink escape attempts are rejected.
 - Exercise MCP `initialize`, `tools/list`, and every `tools/call` directly over stdio.
 - Compile the Telegram macOS scheme and confirm the helper is copied into the app bundle.
-- Commit the checkpoint, rebuild, sign if required for local development, and relaunch TelegramWork.
+- Commit the checkpoint, rebuild, sign if required for local development, and relaunch Kite.

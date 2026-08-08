@@ -1162,7 +1162,7 @@
 		A789E08423E05EAE00AEB34A /* ChatListFiltersListController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A789E08323E05EAE00AEB34A /* ChatListFiltersListController.swift */; };
 		F0C0DE012F7A000100000001 /* WorkspaceProfiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0C0DE022F7A000100000001 /* WorkspaceProfiles.swift */; };
 		F0C0DE052F7A000100000001 /* WorkspaceAI.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0C0DE062F7A000100000001 /* WorkspaceAI.swift */; };
-		F0C0DE032F7A000100000001 /* telegramwork_knowledge_mcp.py in Resources */ = {isa = PBXBuildFile; fileRef = F0C0DE042F7A000100000001 /* telegramwork_knowledge_mcp.py */; };
+		F0C0DE032F7A000100000001 /* kite_knowledge_mcp.py in Resources */ = {isa = PBXBuildFile; fileRef = F0C0DE042F7A000100000001 /* kite_knowledge_mcp.py */; };
 		A7919138240D1077002011CA /* ChatListFilterPredicate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7919137240D1077002011CA /* ChatListFilterPredicate.swift */; };
 		A7ADC47A2587B3750069737A /* VoiceChatActionButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7ADC4792587B3750069737A /* VoiceChatActionButton.swift */; };
 		A7B6DDD723ED935100B8E01C /* think_spectacular.tgs in Resources */ = {isa = PBXBuildFile; fileRef = A7B6DDD623ED8FDF00B8E01C /* think_spectacular.tgs */; };
@@ -2834,7 +2834,7 @@
 		A789E08323E05EAE00AEB34A /* ChatListFiltersListController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatListFiltersListController.swift; sourceTree = "<group>"; };
 		F0C0DE022F7A000100000001 /* WorkspaceProfiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceProfiles.swift; sourceTree = "<group>"; };
 		F0C0DE062F7A000100000001 /* WorkspaceAI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceAI.swift; sourceTree = "<group>"; };
-		F0C0DE042F7A000100000001 /* telegramwork_knowledge_mcp.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = telegramwork_knowledge_mcp.py; sourceTree = "<group>"; };
+		F0C0DE042F7A000100000001 /* kite_knowledge_mcp.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = kite_knowledge_mcp.py; sourceTree = "<group>"; };
 		A7919137240D1077002011CA /* ChatListFilterPredicate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatListFilterPredicate.swift; sourceTree = "<group>"; };
 		A7ADC4792587B3750069737A /* VoiceChatActionButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceChatActionButton.swift; sourceTree = "<group>"; };
 		A7B6DDD623ED8FDF00B8E01C /* think_spectacular.tgs */ = {isa = PBXFileReference; lastKnownFileType = file; path = think_spectacular.tgs; sourceTree = "<group>"; };
@@ -4950,7 +4950,7 @@
 				F0C0DE022F7A000100000001 /* WorkspaceProfiles.swift */,
 				F0C0DE0B2F7A000100000002 /* WorkspaceVoiceTranscriber.swift */,
 				F0C0DE062F7A000100000001 /* WorkspaceAI.swift */,
-				F0C0DE042F7A000100000001 /* telegramwork_knowledge_mcp.py */,
+				F0C0DE042F7A000100000001 /* kite_knowledge_mcp.py */,
 				D0FFC4AB23E184BA0044D305 /* ChatListFilterController.swift */,
 				A7919137240D1077002011CA /* ChatListFilterPredicate.swift */,
 				A7029EF7240E3A5400A89ABD /* ChatListFiltersHeaderItem.swift */,
@@ -7213,7 +7213,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				F0C0DE032F7A000100000001 /* telegramwork_knowledge_mcp.py in Resources */,
+				F0C0DE032F7A000100000001 /* kite_knowledge_mcp.py in Resources */,
 				272934102778DFFA00F10D3C /* menu_file.tgs in Resources */,
 				27803C0127A3E944007B0FA9 /* menu_folder_student.tgs in Resources */,
 				27C6B65D29DC123500F7E7AC /* share_folder.tgs in Resources */,
@@ -8853,7 +8853,7 @@
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				NEW_SETTING = "";
-				PRODUCT_BUNDLE_IDENTIFIER = dev.telegramwork.Telegram.FocusIntents;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.kiteapp.Kite.FocusIntents;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
@@ -8905,7 +8905,7 @@
 				MARKETING_VERSION = 1.0;
 				MTL_FAST_MATH = YES;
 				NEW_SETTING = "";
-				PRODUCT_BUNDLE_IDENTIFIER = dev.telegramwork.Telegram.FocusIntents;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.kiteapp.Kite.FocusIntents;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -9025,9 +9025,9 @@
 					"$(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/macosx/libswiftAppKit.dylib",
 				);
 				OTHER_SWIFT_FLAGS = "$(inherited)";
-				PRODUCT_BUNDLE_IDENTIFIER = dev.telegramwork.Telegram;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.kiteapp.Kite;
 				PRODUCT_MODULE_NAME = Telegram;
-				PRODUCT_NAME = TelegramWork;
+				PRODUCT_NAME = Kite;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = PRODUCTION;
 				SWIFT_COMPILATION_MODE = wholemodule;
@@ -9079,7 +9079,7 @@
 				OTHER_CODE_SIGN_FLAGS = "";
 				OTHER_LDFLAGS = "$(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/macosx/libswiftAppKit.dylib";
 				OTHER_SWIFT_FLAGS = "$(inherited)";
-				PRODUCT_BUNDLE_IDENTIFIER = dev.telegramwork.Telegram.TelegramShare;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.kiteapp.Kite.Share;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SKIP_INSTALL = NO;
@@ -9132,7 +9132,7 @@
 				OTHER_LDFLAGS = "$(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/macosx/libswiftAppKit.dylib";
 				OTHER_SWIFT_FLAGS = "$(inherited)";
 				"OTHER_SWIFT_FLAGS[arch=*]" = "";
-				PRODUCT_BUNDLE_IDENTIFIER = dev.telegramwork.Telegram.TelegramShare;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.kiteapp.Kite.Share;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SKIP_INSTALL = NO;
@@ -9257,9 +9257,9 @@
 					"$(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/macosx/libswiftAppKit.dylib",
 				);
 				OTHER_SWIFT_FLAGS = "$(inherited)";
-				PRODUCT_BUNDLE_IDENTIFIER = dev.telegramwork.Telegram;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.kiteapp.Kite;
 				PRODUCT_MODULE_NAME = Telegram;
-				PRODUCT_NAME = TelegramWork;
+				PRODUCT_NAME = Kite;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_COMPILATION_MODE = singlefile;

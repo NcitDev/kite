@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Read-only MCP server for a TelegramWork local Markdown integration."""
+"""Read-only MCP server for a Kite local Markdown integration."""
 
 from __future__ import annotations
 
@@ -166,7 +166,7 @@ class KnowledgeServer:
             return {
                 "protocolVersion": params.get("protocolVersion", "2025-03-26"),
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "telegramwork-knowledge", "version": "1.0.0"},
+                "serverInfo": {"name": "kite-knowledge", "version": "1.0.0"},
             }
         if method == "ping":
             return {}

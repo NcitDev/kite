@@ -9,6 +9,12 @@ public final class ApiEnvironment {
     }
     
     public static var bundleId: String {
+        return "dev.kiteapp.Kite"
+    }
+    /// The bundle id this app shipped under before it was renamed to Kite. Kept so an
+    /// existing install can move its accounts and caches into the new group container
+    /// instead of coming up logged out.
+    public static var legacyBundleId: String {
         return "dev.telegramwork.Telegram"
     }
     public static var intentsBundleId: String {
@@ -30,6 +36,37 @@ public final class ApiEnvironment {
         return nil
     }
     
+    /// Moves an existing install's accounts and caches out of the pre-rename group container.
+    /// The group id is derived from the bundle id, so renaming the app would otherwise point it
+    /// at an empty container and log everyone out. Runs before `migrate()` and does nothing once
+    /// the new container holds anything, so it only ever takes effect on the first launch after
+    /// the rename.
+    public static func migrateFromLegacyBundleId() {
+        let manager = FileManager.default
+        guard let legacyRoot = manager.containerURL(forSecurityApplicationGroupIdentifier: teamId + "." + legacyBundleId),
+              let currentRoot = manager.containerURL(forSecurityApplicationGroupIdentifier: group),
+              legacyRoot != currentRoot else {
+            return
+        }
+        let legacyContents = (try? manager.contentsOfDirectory(atPath: legacyRoot.path)) ?? []
+        guard !legacyContents.isEmpty else {
+            return
+        }
+        /// Something may already have created the empty per-source subdirectory, so look for
+        /// actual content rather than trusting that the new container is untouched.
+        let existing = (try? manager.contentsOfDirectory(atPath: currentRoot.path)) ?? []
+        let populated = existing.contains(where: { name in
+            let inner = (try? manager.contentsOfDirectory(atPath: currentRoot.appendingPathComponent(name).path)) ?? []
+            return !inner.isEmpty
+        })
+        guard !populated else {
+            return
+        }
+        for value in legacyContents {
+            try? manager.moveItem(at: legacyRoot.appendingPathComponent(value), to: currentRoot.appendingPathComponent(value))
+        }
+    }
+
     public static func migrate() {
         if let containerURL = containerURL, let legacy = legacyContainerURL, let sequence = FileManager.default.enumerator(atPath: legacy.path) {
             let contents = try? FileManager.default.contentsOfDirectory(at: containerURL, includingPropertiesForKeys: nil, options: [])

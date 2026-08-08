@@ -52,6 +52,7 @@ private struct WorkspaceAIQueuedJob {
     let id: UUID
     let prompt: String
     let onText: (String) -> Void
+    let onStatus: (String) -> Void
     let completion: (Result<String, Error>) -> Void
     var response: String
 }
@@ -65,11 +66,16 @@ final class WorkspaceAIJobCoordinator {
     init(client: WorkspaceACPClient) {
         self.client = client
         eventsDisposable.set((client.events |> deliverOnMainQueue).start(next: { [weak self] event in
-            guard let self, var active = self.active, let text = self.textChunk(from: event.update), !text.isEmpty else {
+            guard let self, let active = self.active else { return }
+            if let status = self.statusDescription(from: event.update) {
+                active.onStatus(status)
+            }
+            guard let text = self.textChunk(from: event.update), !text.isEmpty else {
                 return
             }
-            active.response += text
-            self.active = active
+            var updated = active
+            updated.response += text
+            self.active = updated
             active.onText(text)
         }))
     }
@@ -78,12 +84,13 @@ final class WorkspaceAIJobCoordinator {
     func submit(
         prompt: String,
         onText: @escaping (String) -> Void,
+        onStatus: @escaping (String) -> Void = { _ in },
         completion: @escaping (Result<String, Error>) -> Void
     ) -> UUID {
         let id = UUID()
         let enqueue = { [weak self] in
             guard let self else { return }
-            self.queued.append(WorkspaceAIQueuedJob(id: id, prompt: prompt, onText: onText, completion: completion, response: ""))
+            self.queued.append(WorkspaceAIQueuedJob(id: id, prompt: prompt, onText: onText, onStatus: onStatus, completion: completion, response: ""))
             self.startNextIfNeeded()
         }
         if Thread.isMainThread {
@@ -136,6 +143,27 @@ final class WorkspaceAIJobCoordinator {
                 }
                 self.startNextIfNeeded()
             }
+        }
+    }
+
+    /// Turns an ACP session update into a short line describing what the agent is doing, so a
+    /// long request reads as progress rather than a stalled spinner.
+    private func statusDescription(from update: [String: Any]) -> String? {
+        let kind = (update["sessionUpdate"] as? String) ?? (update["type"] as? String) ?? ""
+        switch kind {
+        case "agent_thought_chunk":
+            return "Thinking…"
+        case "agent_message_chunk":
+            return "Writing…"
+        case "tool_call", "tool_call_update":
+            if let title = update["title"] as? String, !title.isEmpty {
+                return title
+            }
+            return "Using a tool…"
+        case "plan", "plan_update":
+            return "Planning…"
+        default:
+            return nil
         }
     }
 

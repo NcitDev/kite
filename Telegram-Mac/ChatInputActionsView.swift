@@ -263,7 +263,7 @@ private final class CodexAssistantHistoryStore {
 private final class CodexAssistantSession {
     enum Phase {
         case idle
-        case running(action: CodexAssistantAction, text: String)
+        case running(action: CodexAssistantAction, text: String, status: String)
         case result(action: CodexAssistantAction?, text: String)
         case image(url: URL, caption: String)
     }
@@ -316,15 +316,24 @@ private final class CodexAssistantSession {
     ) {
         cancelActiveJob()
         runningAction = action
-        present(.running(action: action, text: "Thinking…"))
+        present(.running(action: action, text: "", status: "Starting…"))
 
         jobId = coordinator.submit(prompt: prompt, onText: { [weak self] chunk in
             guard let self, streams, self.runningAction == action else { return }
             var accumulated = ""
-            if case let .running(_, text) = self.phase, text != "Thinking…" {
+            var status = "Writing…"
+            if case let .running(_, text, currentStatus) = self.phase {
+                accumulated = text
+                status = currentStatus
+            }
+            self.present(.running(action: action, text: accumulated + chunk, status: status))
+        }, onStatus: { [weak self] status in
+            guard let self, self.runningAction == action else { return }
+            var accumulated = ""
+            if case let .running(_, text, _) = self.phase {
                 accumulated = text
             }
-            self.present(.running(action: action, text: accumulated + chunk))
+            self.present(.running(action: action, text: accumulated, status: status))
         }, completion: { [weak self] result in
             guard let self, self.runningAction == action else { return }
             self.jobId = nil
@@ -579,6 +588,7 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
     private let copyButton = TextButton()
     private let newRequestButton = TextButton()
     private let cancelButton = TextButton()
+    private let statusLine = TextView()
     private var currentAction: CodexAssistantAction?
     /// What the composer and its button currently do — free-form question, or image description.
     private var composerMode: CodexAssistantAction = .custom
@@ -660,6 +670,10 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         responseContainer.addSubview(copyButton)
         responseContainer.addSubview(newRequestButton)
         responseContainer.addSubview(cancelButton)
+        responseContainer.addSubview(statusLine)
+        statusLine.userInteractionEnabled = false
+        statusLine.isSelectable = false
+        statusLine.isHidden = true
 
         promptScroll.documentView = promptText
         promptScroll.drawsBackground = false
@@ -1075,6 +1089,7 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
 
     /// Shows a generated image in place of the response text, ready to attach to the chat.
     func setImageResult(_ url: URL, caption: String) {
+        statusLine.isHidden = true
         generatedImageURL = url
         currentAction = .generateImage
         resultImage.image = NSImage(contentsOf: url)?.cgImage(forProposedRect: nil, context: nil, hints: nil)
@@ -1093,7 +1108,37 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         needsLayout = true
     }
 
+    /// Progress view for a request in flight: a live status line, plus whatever text has
+    /// streamed back so far. Without this a long request looks identical to a hung one.
+    func setRunning(text: String, status: String, action: CodexAssistantAction) {
+        currentAction = action
+        generatedImageURL = nil
+        resultImage.isHidden = true
+        responseText.string = text
+        responseContainer.isHidden = false
+        emptyHint.isHidden = true
+
+        let layout = TextViewLayout(.initialize(string: status, color: theme.colors.grayText, font: .medium(11)), maximumNumberOfLines: 1, truncationType: .end)
+        layout.measure(width: max(80, responseContainer.frame.width - 40))
+        statusLine.update(layout)
+        statusLine.isHidden = false
+
+        /// The spinner only earns its place before any text arrives.
+        let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        progress.isHidden = hasText
+        responseScroll.isHidden = !hasText
+        cancelButton.isHidden = false
+        newRequestButton.isHidden = true
+        useButton.isHidden = true
+        copyButton.isHidden = true
+        if hasText {
+            responseScroll.contentView.scroll(to: NSMakePoint(0, responseText.bounds.height))
+        }
+        needsLayout = true
+    }
+
     func setResult(_ text: String, action: CodexAssistantAction?, loading: Bool, running: Bool = false) {
+        statusLine.isHidden = true
         currentAction = action
         generatedImageURL = nil
         resultImage.isHidden = true
@@ -1145,6 +1190,7 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         promptContainer.isHidden = false
         responseContainer.isHidden = true
         emptyHint.isHidden = false
+        statusLine.isHidden = true
         updatePromptState()
         needsLayout = true
         if focus {
@@ -1253,8 +1299,12 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         emptyHint.setFrameOrigin(NSMakePoint(inset + floor((contentWidth - emptyHint.frame.width) / 2), y + floor((resultHeight - emptyHint.frame.height) / 2)))
 
         let actionsHeight: CGFloat = (newRequestButton.isHidden && cancelButton.isHidden) ? 0 : 38
-        responseScroll.frame = NSMakeRect(4, 4, responseContainer.frame.width - 8, responseContainer.frame.height - 8 - actionsHeight)
-        resultImage.frame = NSMakeRect(8, 8, responseContainer.frame.width - 16, responseContainer.frame.height - 16 - actionsHeight)
+        let statusHeight: CGFloat = statusLine.isHidden ? 0 : statusLine.frame.height + 12
+        if !statusLine.isHidden {
+            statusLine.setFrameOrigin(NSMakePoint(10, 8))
+        }
+        responseScroll.frame = NSMakeRect(4, 4 + statusHeight, responseContainer.frame.width - 8, responseContainer.frame.height - 8 - statusHeight - actionsHeight)
+        resultImage.frame = NSMakeRect(8, 8 + statusHeight, responseContainer.frame.width - 16, responseContainer.frame.height - 16 - statusHeight - actionsHeight)
         progress.center()
         if !cancelButton.isHidden {
             cancelButton.setFrameOrigin(NSMakePoint(10, responseContainer.frame.height - cancelButton.frame.height - 8))
@@ -1310,8 +1360,8 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
         switch phase {
         case .idle:
             genericView.showComposerState()
-        case let .running(action, text):
-            genericView.setResult(text, action: action, loading: text == "Thinking…", running: true)
+        case let .running(action, text, status):
+            genericView.setRunning(text: text, status: status, action: action)
         case let .result(action, text):
             genericView.setResult(text, action: action, loading: false)
         case let .image(url, caption):
@@ -1465,7 +1515,7 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
         session.cancelActiveJob()
         activeAction = action
         let dateRange = genericView.selectedDateRange
-        session.present(.running(action: action, text: "Thinking…"))
+        session.present(.running(action: action, text: "", status: "Starting…"))
 
         /// Point the live session at this action's model before the prompt goes out. Both calls
         /// queue on the client's serial queue, so set_model always precedes session/prompt.

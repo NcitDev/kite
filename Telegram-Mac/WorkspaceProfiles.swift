@@ -732,6 +732,7 @@ final class WorkspaceACPClient {
     private let queue = DispatchQueue(label: "telegram.workspace-acp")
     private let statusPromise = ValuePromise<WorkspaceACPStatus>(.disconnected, ignoreRepeated: true)
     private let modelsPromise = ValuePromise<[WorkspaceACPModel]>([], ignoreRepeated: true)
+    private let currentModelPromise = ValuePromise<String>("", ignoreRepeated: true)
     private let eventPipe = ValuePipe<WorkspaceACPEvent>()
     private var process: Process?
     private var input: FileHandle?
@@ -754,6 +755,28 @@ final class WorkspaceACPClient {
     /// not report any, in which case the picker falls back to the provider's known list.
     var models: Signal<[WorkspaceACPModel], NoError> {
         return modelsPromise.get()
+    }
+
+    /// Model the agent says the live session is using.
+    var currentModel: Signal<String, NoError> {
+        return currentModelPromise.get()
+    }
+
+    /// Switches model on the running session. ACP exposes `session/set_model`, so there is no
+    /// need to tear the agent process down just to change model.
+    func selectModel(_ modelId: String) {
+        queue.async { [weak self] in
+            guard let self, let sessionId = self.sessionId else { return }
+            self.sendRequest(method: "session/set_model", params: [
+                "sessionId": sessionId,
+                "modelId": modelId
+            ]) { [weak self] response in
+                guard let self else { return }
+                if response["error"] == nil {
+                    self.currentModelPromise.set(modelId)
+                }
+            }
+        }
     }
 
     /// Streams agent response chunks, plans, task/tool updates, and future ACP update types.
@@ -962,12 +985,20 @@ final class WorkspaceACPClient {
             }
             self.sessionId = sessionId
             self.modelsPromise.set(WorkspaceACPClient.parseModels(from: result))
+            self.currentModelPromise.set(WorkspaceACPClient.parseCurrentModel(from: result))
             self.statusPromise.set(.connected(agentName: self.agentName ?? configuration.provider.title))
         }
     }
 
     /// ACP agents report their model list in more than one shape, so accept either a bare array
     /// or an object wrapping one, and tolerate both `modelId` and `id` spellings.
+    private static func parseCurrentModel(from result: [String: Any]) -> String {
+        if let object = result["models"] as? [String: Any], let current = object["currentModelId"] as? String {
+            return current
+        }
+        return result["currentModelId"] as? String ?? ""
+    }
+
     private static func parseModels(from result: [String: Any]) -> [WorkspaceACPModel] {
         let raw: [[String: Any]]
         if let array = result["models"] as? [[String: Any]] {
@@ -993,6 +1024,8 @@ final class WorkspaceACPClient {
         pending.removeAll()
         sessionId = nil
         configuration = nil
+        modelsPromise.set([])
+        currentModelPromise.set("")
         agentName = nil
         authenticationMethods = []
         permissionHandler = nil
@@ -1205,6 +1238,7 @@ private func workspaceProfileEntries(
     filters: [ChatListFilter],
     acpStatus: WorkspaceACPStatus,
     acpModels: [WorkspaceACPModel],
+    acpCurrentModel: String,
     store: WorkspaceProfileStore,
     client: WorkspaceACPClient
 ) -> [InputDataEntry] {
@@ -1475,31 +1509,34 @@ private func workspaceProfileEntries(
     let offered = !discovered.isEmpty
         ? discovered
         : state.acp.provider.suggestedModels.map { WorkspaceACPModel(id: $0, name: $0) }
-    let selectedModelTitle = state.acp.model.isEmpty
+    /// While connected the agent's own current model wins; otherwise show what will be requested.
+    let effectiveModel = acpCurrentModel.isEmpty ? state.acp.model : acpCurrentModel
+    let selectedModelTitle = effectiveModel.isEmpty
         ? "Agent default"
-        : (offered.first(where: { $0.id == state.acp.model })?.name ?? state.acp.model)
+        : (offered.first(where: { $0.id == effectiveModel })?.name ?? effectiveModel)
     entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.acp.model"), data: .init(
         name: "Model",
         color: theme.colors.text,
         type: .contextSelector(selectedModelTitle, {
             var items: [ContextMenuItem] = []
             let agentDefault = ContextMenuItem("Agent default", handler: {
-                client.disconnect()
                 store.updateACP { $0.model = "" }
+                /// Nothing to switch to on a live session — this only affects the next launch.
             })
-            agentDefault.state = state.acp.model.isEmpty ? .on : .off
+            agentDefault.state = effectiveModel.isEmpty ? .on : .off
             items.append(agentDefault)
             for entry in offered {
                 let item = ContextMenuItem(entry.name, handler: {
-                    client.disconnect()
                     store.updateACP { $0.model = entry.id }
+                    /// Switch the live session in place; falls back to the launch flag next time.
+                    client.selectModel(entry.id)
                 })
-                item.state = entry.id == state.acp.model ? .on : .off
+                item.state = entry.id == effectiveModel ? .on : .off
                 items.append(item)
             }
             /// A model the agent knows about but we have never seen must still be selectable.
-            if !state.acp.model.isEmpty, !offered.contains(where: { $0.id == state.acp.model }) {
-                let item = ContextMenuItem(state.acp.model, handler: {})
+            if !effectiveModel.isEmpty, !offered.contains(where: { $0.id == effectiveModel }) {
+                let item = ContextMenuItem(effectiveModel, handler: {})
                 item.state = .on
                 items.insert(item, at: 1)
             }
@@ -1586,9 +1623,9 @@ func WorkspaceProfilesController(context: AccountContext) -> InputDataController
     let store = WorkspaceProfileStore.shared(accountId: accountId)
     let client = WorkspaceACPRegistry.shared.client(accountId: accountId)
     let filters = chatListFilterPreferences(engine: context.engine) |> map { $0.list }
-    let signal = combineLatest(queue: prepareQueue, appearanceSignal, store.signal, filters, client.status, client.models)
-    |> map { _, state, filters, acpStatus, acpModels in
-        return InputDataSignalValue(entries: workspaceProfileEntries(context: context, state: state, filters: filters, acpStatus: acpStatus, acpModels: acpModels, store: store, client: client))
+    let signal = combineLatest(queue: prepareQueue, appearanceSignal, store.signal, filters, client.status, client.models, client.currentModel)
+    |> map { _, state, filters, acpStatus, acpModels, acpCurrentModel in
+        return InputDataSignalValue(entries: workspaceProfileEntries(context: context, state: state, filters: filters, acpStatus: acpStatus, acpModels: acpModels, acpCurrentModel: acpCurrentModel, store: store, client: client))
     }
     let controller = InputDataController(dataSignal: signal, title: "Profiles & Automation", removeAfterDisappear: false, hasDone: false, identifier: "workspace_profiles")
     controller.updateDatas = { data in

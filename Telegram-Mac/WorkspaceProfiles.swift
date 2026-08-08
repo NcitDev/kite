@@ -153,6 +153,7 @@ extension WorkspaceProfile {
 enum WorkspaceACPProvider: String, Codable, CaseIterable {
     case codex
     case claude
+    case opencode
     case custom
 
     var title: String {
@@ -161,6 +162,8 @@ enum WorkspaceACPProvider: String, Codable, CaseIterable {
             return "Codex"
         case .claude:
             return "Claude"
+        case .opencode:
+            return "opencode"
         case .custom:
             return "Custom ACP Agent"
         }
@@ -172,6 +175,9 @@ enum WorkspaceACPProvider: String, Codable, CaseIterable {
             return ["npx", "-y", "@agentclientprotocol/codex-acp"]
         case .claude:
             return ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
+        case .opencode:
+            /// opencode ships its own binary and exposes ACP as a subcommand.
+            return ["opencode", "acp"]
         case .custom:
             return []
         }
@@ -183,7 +189,7 @@ enum WorkspaceACPProvider: String, Codable, CaseIterable {
         switch self {
         case .claude:
             return ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", "claude-opus-4-8"]
-        case .codex, .custom:
+        case .codex, .opencode, .custom:
             return []
         }
     }
@@ -271,6 +277,8 @@ struct WorkspaceACPConfiguration: Codable, Equatable {
             inferredProvider = .claude
         } else if arguments.contains(where: { $0.contains("codex") }) {
             inferredProvider = .codex
+        } else if arguments.contains(where: { $0.contains("opencode") }) {
+            inferredProvider = .opencode
         } else {
             inferredProvider = .custom
         }
@@ -733,6 +741,7 @@ final class WorkspaceACPClient {
     private let statusPromise = ValuePromise<WorkspaceACPStatus>(.disconnected, ignoreRepeated: true)
     private let modelsPromise = ValuePromise<[WorkspaceACPModel]>([], ignoreRepeated: true)
     private let currentModelPromise = ValuePromise<String>("", ignoreRepeated: true)
+    private var modelUsesConfigOption = false
     private let eventPipe = ValuePipe<WorkspaceACPEvent>()
     private var process: Process?
     private var input: FileHandle?
@@ -767,10 +776,11 @@ final class WorkspaceACPClient {
     func selectModel(_ modelId: String) {
         queue.async { [weak self] in
             guard let self, let sessionId = self.sessionId else { return }
-            self.sendRequest(method: "session/set_model", params: [
-                "sessionId": sessionId,
-                "modelId": modelId
-            ]) { [weak self] response in
+            let method = self.modelUsesConfigOption ? "session/set_config_option" : "session/set_model"
+            let params: [String: Any] = self.modelUsesConfigOption
+                ? ["sessionId": sessionId, "configId": "model", "value": modelId]
+                : ["sessionId": sessionId, "modelId": modelId]
+            self.sendRequest(method: method, params: params) { [weak self] response in
                 guard let self else { return }
                 if response["error"] == nil {
                     self.currentModelPromise.set(modelId)
@@ -984,6 +994,7 @@ final class WorkspaceACPClient {
                 return
             }
             self.sessionId = sessionId
+            self.modelUsesConfigOption = WorkspaceACPClient.usesConfigOptionForModel(result)
             self.modelsPromise.set(WorkspaceACPClient.parseModels(from: result))
             self.currentModelPromise.set(WorkspaceACPClient.parseCurrentModel(from: result))
             self.statusPromise.set(.connected(agentName: self.agentName ?? configuration.provider.title))
@@ -996,24 +1007,49 @@ final class WorkspaceACPClient {
         if let object = result["models"] as? [String: Any], let current = object["currentModelId"] as? String {
             return current
         }
-        return result["currentModelId"] as? String ?? ""
+        if let current = result["currentModelId"] as? String {
+            return current
+        }
+        return (modelConfigOption(in: result)?["currentValue"] as? String) ?? ""
     }
 
+    /// Whether the agent drives model selection through `configOptions` rather than `models`.
+    private static func usesConfigOptionForModel(_ result: [String: Any]) -> Bool {
+        return (result["models"] == nil) && modelConfigOption(in: result) != nil
+    }
+
+    /// The `configOptions` entry an agent uses for model selection, when it has one.
+    private static func modelConfigOption(in result: [String: Any]) -> [String: Any]? {
+        guard let options = result["configOptions"] as? [[String: Any]] else { return nil }
+        return options.first(where: { ($0["id"] as? String) == "model" || ($0["category"] as? String) == "model" })
+    }
+
+    /// Two agents, two shapes. codex-acp answers `session/new` with `models.availableModels`,
+    /// where the reasoning effort is already folded into each id (`gpt-5.6-sol[high]`);
+    /// opencode instead lists a `configOptions` entry whose id is `model`. Read both.
     private static func parseModels(from result: [String: Any]) -> [WorkspaceACPModel] {
-        let raw: [[String: Any]]
-        if let array = result["models"] as? [[String: Any]] {
-            raw = array
-        } else if let object = result["models"] as? [String: Any] {
-            raw = (object["availableModels"] as? [[String: Any]]) ?? (object["models"] as? [[String: Any]]) ?? []
-        } else {
-            raw = (result["availableModels"] as? [[String: Any]]) ?? []
-        }
-        return raw.compactMap { entry in
-            guard let id = (entry["modelId"] as? String) ?? (entry["id"] as? String), !id.isEmpty else {
-                return nil
+        func mapped(_ entries: [[String: Any]]) -> [WorkspaceACPModel] {
+            return entries.compactMap { entry in
+                guard let id = (entry["modelId"] as? String) ?? (entry["id"] as? String), !id.isEmpty else {
+                    return nil
+                }
+                let name = (entry["name"] as? String) ?? (entry["displayName"] as? String) ?? id
+                return WorkspaceACPModel(id: id, name: name)
             }
-            let name = (entry["name"] as? String) ?? (entry["displayName"] as? String) ?? id
-            return WorkspaceACPModel(id: id, name: name)
+        }
+        if let object = result["models"] as? [String: Any],
+           let available = object["availableModels"] as? [[String: Any]] {
+            return mapped(available)
+        }
+        if let array = result["models"] as? [[String: Any]] {
+            return mapped(array)
+        }
+        guard let options = modelConfigOption(in: result)?["options"] as? [[String: Any]] else {
+            return []
+        }
+        return options.compactMap { entry in
+            guard let value = entry["value"] as? String, !value.isEmpty else { return nil }
+            return WorkspaceACPModel(id: value, name: (entry["name"] as? String) ?? value)
         }
     }
 

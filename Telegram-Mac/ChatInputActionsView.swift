@@ -578,6 +578,7 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
     private let useButton = TextButton()
     private let copyButton = TextButton()
     private let newRequestButton = TextButton()
+    private let cancelButton = TextButton()
     private var currentAction: CodexAssistantAction?
     /// What the composer and its button currently do — free-form question, or image description.
     private var composerMode: CodexAssistantAction = .custom
@@ -594,6 +595,7 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
     var useResult: ((String, CodexAssistantAction?) -> Void)?
     var useImageResult: ((URL) -> Void)?
     var newRequestSelected: (() -> Void)?
+    var cancelSelected: (() -> Void)?
     var historySelected: ((CodexAssistantHistoryEntry) -> Void)?
 
     var selectedDateRange: ClosedRange<Date> {
@@ -657,6 +659,7 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         responseContainer.addSubview(useButton)
         responseContainer.addSubview(copyButton)
         responseContainer.addSubview(newRequestButton)
+        responseContainer.addSubview(cancelButton)
 
         promptScroll.documentView = promptText
         promptScroll.drawsBackground = false
@@ -729,6 +732,11 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
             guard let value = self?.responseText.string, !value.isEmpty else { return }
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(value, forType: .string)
+        }, for: .Click)
+
+        cancelButton.scaleOnClick = true
+        cancelButton.set(handler: { [weak self] _ in
+            self?.cancelSelected?()
         }, for: .Click)
 
         newRequestButton.scaleOnClick = true
@@ -843,6 +851,12 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         copyButton.set(font: .medium(12), for: .Normal)
         copyButton.set(color: theme.colors.accent, for: .Normal)
         copyButton.set(background: .clear, for: .Normal)
+
+        cancelButton.set(text: "Stop", for: .Normal)
+        cancelButton.set(font: .medium(12), for: .Normal)
+        cancelButton.set(color: theme.colors.redUI, for: .Normal)
+        cancelButton.set(background: .clear, for: .Normal)
+        cancelButton.sizeToFit(NSMakeSize(10, 10))
 
         newRequestButton.set(text: "New request", for: .Normal)
         newRequestButton.set(font: .medium(12), for: .Normal)
@@ -1070,6 +1084,7 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         responseContainer.isHidden = false
         emptyHint.isHidden = true
         progress.isHidden = true
+        cancelButton.isHidden = true
         newRequestButton.isHidden = false
         useButton.isHidden = false
         copyButton.isHidden = true
@@ -1078,7 +1093,7 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         needsLayout = true
     }
 
-    func setResult(_ text: String, action: CodexAssistantAction?, loading: Bool) {
+    func setResult(_ text: String, action: CodexAssistantAction?, loading: Bool, running: Bool = false) {
         currentAction = action
         generatedImageURL = nil
         resultImage.isHidden = true
@@ -1088,9 +1103,10 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         emptyHint.isHidden = true
         progress.isHidden = !loading
         responseScroll.isHidden = loading
-        newRequestButton.isHidden = loading
-        useButton.isHidden = loading || action == nil || text.isEmpty
-        copyButton.isHidden = loading || action == nil || text.isEmpty
+        cancelButton.isHidden = !running
+        newRequestButton.isHidden = loading || running
+        useButton.isHidden = loading || running || action == nil || text.isEmpty
+        copyButton.isHidden = loading || running || action == nil || text.isEmpty
         useButton.set(text: action == .draftReply || action == .polishDraft || action == .translate ? "Use draft" : "Add to draft", for: .Normal)
         useButton.sizeToFit(NSMakeSize(16, 10))
         copyButton.sizeToFit(NSMakeSize(10, 10))
@@ -1107,6 +1123,11 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         emptyHint.isHidden = true
         progress.isHidden = true
         responseScroll.isHidden = false
+        cancelButton.isHidden = false
+        newRequestButton.isHidden = true
+        useButton.isHidden = true
+        copyButton.isHidden = true
+        needsLayout = true
         responseScroll.contentView.scroll(to: NSMakePoint(0, responseText.bounds.height))
     }
 
@@ -1231,10 +1252,13 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         responseContainer.frame = NSMakeRect(inset, y, contentWidth, resultHeight)
         emptyHint.setFrameOrigin(NSMakePoint(inset + floor((contentWidth - emptyHint.frame.width) / 2), y + floor((resultHeight - emptyHint.frame.height) / 2)))
 
-        let actionsHeight: CGFloat = newRequestButton.isHidden ? 0 : 38
+        let actionsHeight: CGFloat = (newRequestButton.isHidden && cancelButton.isHidden) ? 0 : 38
         responseScroll.frame = NSMakeRect(4, 4, responseContainer.frame.width - 8, responseContainer.frame.height - 8 - actionsHeight)
         resultImage.frame = NSMakeRect(8, 8, responseContainer.frame.width - 16, responseContainer.frame.height - 16 - actionsHeight)
         progress.center()
+        if !cancelButton.isHidden {
+            cancelButton.setFrameOrigin(NSMakePoint(10, responseContainer.frame.height - cancelButton.frame.height - 8))
+        }
         if !newRequestButton.isHidden {
             newRequestButton.setFrameOrigin(NSMakePoint(10, responseContainer.frame.height - newRequestButton.frame.height - 8))
             if !useButton.isHidden {
@@ -1287,7 +1311,7 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
         case .idle:
             genericView.showComposerState()
         case let .running(action, text):
-            genericView.setResult(text, action: action, loading: text == "Thinking…")
+            genericView.setResult(text, action: action, loading: text == "Thinking…", running: true)
         case let .result(action, text):
             genericView.setResult(text, action: action, loading: false)
         case let .image(url, caption):
@@ -1306,6 +1330,15 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
         }
         genericView.connectSelected = { [weak self] in
             self?.connectOrOpenSettings()
+        }
+        genericView.cancelSelected = { [weak self] in
+            guard let self else { return }
+            /// cancelActiveJob clears the running action, so the job's own cancellation callback
+            /// is filtered out — reset the phase here rather than waiting for it.
+            self.session.cancelActiveJob()
+            self.activeAction = nil
+            self.historyDisposable.set(nil)
+            self.session.present(.idle)
         }
         genericView.newRequestSelected = { [weak self] in
             /// Clearing the panel must clear the session too, or reopening resurrects the result.

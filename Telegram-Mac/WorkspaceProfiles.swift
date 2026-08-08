@@ -236,16 +236,6 @@ struct WorkspaceACPConfiguration: Codable, Equatable {
         )
     }
 
-    /// The launch arguments with the model flag applied. Kept out of `arguments` itself so the
-    /// picker can change the model without rewriting what the user typed.
-    var launchArguments: [String] {
-        let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !arguments.contains("--model") else {
-            return arguments
-        }
-        return arguments + ["--model", trimmed]
-    }
-
     mutating func selectProvider(_ provider: WorkspaceACPProvider) {
         self.provider = provider
         guard provider != .custom else {
@@ -808,6 +798,34 @@ final class WorkspaceACPClient {
     private let modelsPromise = ValuePromise<[WorkspaceACPModel]>([], ignoreRepeated: true)
     private let currentModelPromise = ValuePromise<String>("", ignoreRepeated: true)
     private var modelUsesConfigOption = false
+    /// A GUI app launched by launchd inherits only `/usr/bin:/bin:/usr/sbin:/sbin`, so the
+    /// package managers agents are installed with — Homebrew, bun, npm, asdf — are invisible to
+    /// it and `/usr/bin/env <agent>` fails. Put the usual install locations back on PATH.
+    static func agentEnvironment() -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        let home = NSHomeDirectory()
+        let candidates = [
+            "\(home)/.bun/bin",
+            "\(home)/.local/bin",
+            "\(home)/.volta/bin",
+            "\(home)/.asdf/shims",
+            "\(home)/.npm-global/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin"
+        ]
+        let existing = (environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
+            .components(separatedBy: ":")
+            .filter { !$0.isEmpty }
+        var combined = candidates.filter { FileManager.default.fileExists(atPath: $0) }
+        for entry in existing where !combined.contains(entry) {
+            combined.append(entry)
+        }
+        environment["PATH"] = combined.joined(separator: ":")
+        return environment
+    }
+
+    /// Tail of the agent's stderr, so a non-zero exit can say why instead of just the code.
+    private var lastErrorOutput = ""
     private let eventPipe = ValuePipe<WorkspaceACPEvent>()
     private var process: Process?
     private var input: FileHandle?
@@ -953,15 +971,25 @@ final class WorkspaceACPClient {
         let outputPipe = Pipe()
         let errorPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: configuration.executable)
-        process.arguments = configuration.launchArguments
+        process.arguments = configuration.arguments
         process.currentDirectoryURL = URL(fileURLWithPath: configuration.workingDirectory, isDirectory: true)
+        process.environment = WorkspaceACPClient.agentEnvironment()
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
         process.standardError = errorPipe
         process.terminationHandler = { [weak self] task in
             self?.queue.async {
                 guard let self, self.process === task else { return }
-                self.stopOnQueue(status: .failed("Agent exited with status \(task.terminationStatus)"))
+                let detail = self.lastErrorOutput
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .components(separatedBy: .newlines)
+                    .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                    .suffix(3)
+                    .joined(separator: " ")
+                let reason = detail.isEmpty
+                    ? "Agent exited with status \(task.terminationStatus)"
+                    : "Agent exited with status \(task.terminationStatus): \(detail)"
+                self.stopOnQueue(status: .failed(reason))
             }
         }
 
@@ -972,10 +1000,14 @@ final class WorkspaceACPClient {
                 self?.consume(data)
             }
         }
-        errorPipe.fileHandleForReading.readabilityHandler = { handle in
-            // ACP reserves stdout for protocol frames; drain diagnostic stderr without
-            // treating ordinary agent logs as a connection failure.
-            _ = handle.availableData
+        errorPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            // ACP reserves stdout for protocol frames; stderr is diagnostics only and must not
+            // be treated as a connection failure — but keep the tail to explain a bad exit.
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            self?.queue.async {
+                self?.lastErrorOutput = String((self?.lastErrorOutput ?? "").appending(text).suffix(600))
+            }
         }
 
         do {
@@ -1062,8 +1094,15 @@ final class WorkspaceACPClient {
             self.sessionId = sessionId
             self.modelUsesConfigOption = WorkspaceACPClient.usesConfigOptionForModel(result)
             self.modelsPromise.set(WorkspaceACPClient.parseModels(from: result))
-            self.currentModelPromise.set(WorkspaceACPClient.parseCurrentModel(from: result))
+            let reported = WorkspaceACPClient.parseCurrentModel(from: result)
+            self.currentModelPromise.set(reported)
             self.statusPromise.set(.connected(agentName: self.agentName ?? configuration.provider.title))
+            /// The model is requested over ACP rather than on the command line, because not
+            /// every agent accepts a --model flag.
+            let desired = configuration.model.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !desired.isEmpty, desired != reported {
+                self.selectModel(desired)
+            }
         }
     }
 
@@ -1128,6 +1167,7 @@ final class WorkspaceACPClient {
         configuration = nil
         modelsPromise.set([])
         currentModelPromise.set("")
+        lastErrorOutput = ""
         agentName = nil
         authenticationMethods = []
         permissionHandler = nil

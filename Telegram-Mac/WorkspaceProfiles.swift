@@ -1255,6 +1255,7 @@ enum WorkspaceMessageSender {
 
 private let workspaceProfileNameId = InputDataIdentifier("workspace.profile.name")
 private let workspaceACPExecutableId = InputDataIdentifier("workspace.acp.executable")
+private let workspaceACPModelId = InputDataIdentifier("workspace.acp.model")
 private let workspaceTranscriptionEndpointId = InputDataIdentifier("workspace.transcription.endpoint")
 private let workspaceTranscriptionModelId = InputDataIdentifier("workspace.transcription.model")
 private let workspaceACPArgumentsId = InputDataIdentifier("workspace.acp.arguments")
@@ -1541,45 +1542,20 @@ private func workspaceProfileEntries(
     entries.append(.input(sectionId: sectionId, index: index, value: .string(state.acp.workingDirectory), error: nil, identifier: workspaceACPDirectoryId, mode: .plain, data: .init(viewType: .innerItem), placeholder: InputDataInputPlaceholder("Folder"), inputPlaceholder: "Working directory", filter: { $0 }, limit: 2048))
     index += 1
     /// Prefer what the connected agent reported; fall back to the provider's known list.
-    let discovered = acpModels.map { WorkspaceACPModel(id: $0.id, name: $0.name) }
-    let offered = !discovered.isEmpty
-        ? discovered
+    let offered = !acpModels.isEmpty
+        ? acpModels
         : state.acp.provider.suggestedModels.map { WorkspaceACPModel(id: $0, name: $0) }
     /// While connected the agent's own current model wins; otherwise show what will be requested.
     let effectiveModel = acpCurrentModel.isEmpty ? state.acp.model : acpCurrentModel
-    let selectedModelTitle = effectiveModel.isEmpty
-        ? "Agent default"
-        : (offered.first(where: { $0.id == effectiveModel })?.name ?? effectiveModel)
-    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.acp.model"), data: .init(
-        name: "Model",
-        color: theme.colors.text,
-        type: .contextSelector(selectedModelTitle, {
-            var items: [ContextMenuItem] = []
-            let agentDefault = ContextMenuItem("Agent default", handler: {
-                store.updateACP { $0.model = "" }
-                /// Nothing to switch to on a live session — this only affects the next launch.
-            })
-            agentDefault.state = effectiveModel.isEmpty ? .on : .off
-            items.append(agentDefault)
-            for entry in offered {
-                let item = ContextMenuItem(entry.name, handler: {
-                    store.updateACP { $0.model = entry.id }
-                    /// Switch the live session in place; falls back to the launch flag next time.
-                    client.selectModel(entry.id)
-                })
-                item.state = entry.id == effectiveModel ? .on : .off
-                items.append(item)
-            }
-            /// A model the agent knows about but we have never seen must still be selectable.
-            if !effectiveModel.isEmpty, !offered.contains(where: { $0.id == effectiveModel }) {
-                let item = ContextMenuItem(effectiveModel, handler: {})
-                item.state = .on
-                items.insert(item, at: 1)
-            }
-            return items
-        }()),
-        viewType: .lastItem
-    )))
+    var modelValues: [ValuesSelectorValue<InputDataValue>] = [
+        ValuesSelectorValue(localized: "Agent default", value: .string(""))
+    ]
+    modelValues.append(contentsOf: offered.map { ValuesSelectorValue(localized: $0.name, value: .string($0.id)) })
+    /// A model the agent has since stopped listing must still be shown as the current choice.
+    if !effectiveModel.isEmpty, !offered.contains(where: { $0.id == effectiveModel }) {
+        modelValues.append(ValuesSelectorValue(localized: effectiveModel, value: .string(effectiveModel)))
+    }
+    entries.append(.selector(sectionId: sectionId, index: index, value: .string(effectiveModel), error: nil, identifier: workspaceACPModelId, placeholder: "Model", viewType: .lastItem, values: modelValues))
     index += 1
     let acpHint: String
     if state.acp.provider == .custom {
@@ -1681,6 +1657,13 @@ func WorkspaceProfilesController(context: AccountContext) -> InputDataController
             }
             if let directory = data[workspaceACPDirectoryId]?.stringValue, !directory.isEmpty {
                 configuration.workingDirectory = directory
+            }
+        }
+        if let model = data[workspaceACPModelId]?.stringValue, model != store.current.acp.model {
+            store.updateACP { $0.model = model }
+            /// Switch the live session in place when the agent supports it.
+            if !model.isEmpty {
+                client.selectModel(model)
             }
         }
         store.updateActive { profile in

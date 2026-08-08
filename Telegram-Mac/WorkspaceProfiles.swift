@@ -78,21 +78,26 @@ struct WorkspaceProfile: Codable, Equatable {
     var featureFlags: [String: Bool]
     /// Knowledge integrations are profile-scoped so Work and Home never share sources implicitly.
     var knowledgeIntegrations: [WorkspaceKnowledgeIntegration]
-    /// Generation behavior is profile-scoped so different workspaces can use different AI flows.
-    var aiWorkflow: WorkspaceAIWorkflowSettings
-    /// Native Telegram mutations are approved by stable capability identifier, never display text.
-    var aiApprovals: [String: WorkspaceAIApprovalDecision]
+    /// How far back the in-chat panel looks once "Today" is cleared.
+    var chatRangePreset: WorkspaceChatRangePreset
+    /// Optional on-device speech-to-text server, used instead of Telegram's Premium transcription.
+    var localTranscription: WorkspaceLocalTranscription
 
     func displays(folderId: Int32) -> Bool {
         return showsAllFolders || visibleFolderIds.contains(folderId)
     }
 
-    func isEnabled(_ feature: WorkspaceAIFeature) -> Bool {
-        return featureFlags[feature.rawValue] ?? false
+    /// The single switch that decides whether an action appears in the in-chat panel.
+    func isEnabled(_ action: CodexAssistantAction) -> Bool {
+        return featureFlags[action.flagKey] ?? action.isEnabledByDefault
     }
 
-    func approvalDecision(for capability: WorkspaceAICapability) -> WorkspaceAIApprovalDecision {
-        return aiApprovals[capability.rawValue] ?? .ask
+    /// Capabilities announced to the agent are derived from the actions actually switched on,
+    /// so there is no second set of switches to keep in sync.
+    var advertisedFeatures: [WorkspaceAIFeature] {
+        return WorkspaceAIFeature.allCases.filter { feature in
+            CodexAssistantAction.configurable.contains { $0.feature == feature && isEnabled($0) }
+        }
     }
 }
 
@@ -108,8 +113,8 @@ extension WorkspaceProfile {
         case includedPeerIds
         case featureFlags
         case knowledgeIntegrations
-        case aiWorkflow
-        case aiApprovals
+        case chatRangePreset
+        case localTranscription
     }
 
     init(from decoder: Decoder) throws {
@@ -124,9 +129,8 @@ extension WorkspaceProfile {
         self.includedPeerIds = try container.decodeIfPresent([Int64].self, forKey: .includedPeerIds) ?? []
         self.featureFlags = try container.decodeIfPresent([String: Bool].self, forKey: .featureFlags) ?? [:]
         self.knowledgeIntegrations = try container.decodeIfPresent([WorkspaceKnowledgeIntegration].self, forKey: .knowledgeIntegrations) ?? []
-        self.aiWorkflow = try container.decodeIfPresent(WorkspaceAIWorkflowSettings.self, forKey: .aiWorkflow) ?? .focused
-        self.aiWorkflow.normalize()
-        self.aiApprovals = try container.decodeIfPresent([String: WorkspaceAIApprovalDecision].self, forKey: .aiApprovals) ?? [:]
+        self.chatRangePreset = try container.decodeIfPresent(WorkspaceChatRangePreset.self, forKey: .chatRangePreset) ?? .sevenDays
+        self.localTranscription = try container.decodeIfPresent(WorkspaceLocalTranscription.self, forKey: .localTranscription) ?? .defaultValue
     }
 
     func encode(to encoder: Encoder) throws {
@@ -141,8 +145,8 @@ extension WorkspaceProfile {
         try container.encode(includedPeerIds, forKey: .includedPeerIds)
         try container.encode(featureFlags, forKey: .featureFlags)
         try container.encode(knowledgeIntegrations, forKey: .knowledgeIntegrations)
-        try container.encode(aiWorkflow, forKey: .aiWorkflow)
-        try container.encode(aiApprovals, forKey: .aiApprovals)
+        try container.encode(chatRangePreset, forKey: .chatRangePreset)
+        try container.encode(localTranscription, forKey: .localTranscription)
     }
 }
 
@@ -172,6 +176,29 @@ enum WorkspaceACPProvider: String, Codable, CaseIterable {
             return []
         }
     }
+
+    /// Fallback offered before the agent has ever reported its own list. Only filled in where
+    /// the identifiers are known for certain — everything else comes from the connected agent.
+    var suggestedModels: [String] {
+        switch self {
+        case .claude:
+            return ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", "claude-opus-4-8"]
+        case .codex, .custom:
+            return []
+        }
+    }
+
+    /// Empty means "let the agent choose", which is the only safe default for an agent whose
+    /// model identifiers we do not know.
+    var defaultModel: String {
+        return ""
+    }
+}
+
+/// A model the connected agent reported it can run.
+struct WorkspaceACPModel: Equatable {
+    let id: String
+    let name: String
 }
 
 struct WorkspaceACPConfiguration: Codable, Equatable {
@@ -179,14 +206,29 @@ struct WorkspaceACPConfiguration: Codable, Equatable {
     var executable: String
     var arguments: [String]
     var workingDirectory: String
+    var autoConnect: Bool
+    /// Empty means "let the agent pick"; otherwise appended to the launch arguments.
+    var model: String
 
     static var defaultValue: WorkspaceACPConfiguration {
         return WorkspaceACPConfiguration(
             provider: .codex,
             executable: "/usr/bin/env",
             arguments: WorkspaceACPProvider.codex.defaultArguments,
-            workingDirectory: NSHomeDirectory()
+            workingDirectory: NSHomeDirectory(),
+            autoConnect: true,
+            model: WorkspaceACPProvider.codex.defaultModel
         )
+    }
+
+    /// The launch arguments with the model flag applied. Kept out of `arguments` itself so the
+    /// picker can change the model without rewriting what the user typed.
+    var launchArguments: [String] {
+        let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !arguments.contains("--model") else {
+            return arguments
+        }
+        return arguments + ["--model", trimmed]
     }
 
     mutating func selectProvider(_ provider: WorkspaceACPProvider) {
@@ -196,6 +238,10 @@ struct WorkspaceACPConfiguration: Codable, Equatable {
         }
         self.executable = "/usr/bin/env"
         self.arguments = provider.defaultArguments
+        /// A model id from another provider is meaningless here.
+        if !provider.suggestedModels.contains(model) {
+            self.model = provider.defaultModel
+        }
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -203,13 +249,17 @@ struct WorkspaceACPConfiguration: Codable, Equatable {
         case executable
         case arguments
         case workingDirectory
+        case autoConnect
+        case model
     }
 
-    init(provider: WorkspaceACPProvider, executable: String, arguments: [String], workingDirectory: String) {
+    init(provider: WorkspaceACPProvider, executable: String, arguments: [String], workingDirectory: String, autoConnect: Bool, model: String) {
         self.provider = provider
         self.executable = executable
         self.arguments = arguments
         self.workingDirectory = workingDirectory
+        self.autoConnect = autoConnect
+        self.model = model
     }
 
     init(from decoder: Decoder) throws {
@@ -232,15 +282,18 @@ struct WorkspaceACPConfiguration: Codable, Equatable {
             provider: provider,
             executable: executable,
             arguments: arguments,
-            workingDirectory: try container.decode(String.self, forKey: .workingDirectory)
+            workingDirectory: try container.decode(String.self, forKey: .workingDirectory),
+            autoConnect: try container.decodeIfPresent(Bool.self, forKey: .autoConnect) ?? true,
+            model: try container.decodeIfPresent(String.self, forKey: .model) ?? provider.defaultModel
         )
     }
 }
 
+/// Coarse capability announced to the agent on connect. Derived from the enabled chat actions;
+/// there is no separate user-facing switch.
 enum WorkspaceAIFeature: String, CaseIterable {
     case chatSummaries = "ai.chat-summaries"
     case replyDrafts = "ai.reply-drafts"
-    case scheduledMessages = "ai.scheduled-messages"
 
     var title: String {
         switch self {
@@ -248,13 +301,11 @@ enum WorkspaceAIFeature: String, CaseIterable {
             return "Chat Summaries"
         case .replyDrafts:
             return "Reply Drafts"
-        case .scheduledMessages:
-            return "Scheduled Messages"
         }
     }
 
     var isWriteCapability: Bool {
-        return self == .scheduledMessages
+        return self == .replyDrafts
     }
 }
 
@@ -276,8 +327,8 @@ struct WorkspaceProfileState: Codable, Equatable {
             includedPeerIds: [],
             featureFlags: [:],
             knowledgeIntegrations: [],
-            aiWorkflow: .focused,
-            aiApprovals: [:]
+            chatRangePreset: .sevenDays,
+            localTranscription: .defaultValue
         )
         let home = WorkspaceProfile(
             id: "builtin.home",
@@ -290,8 +341,8 @@ struct WorkspaceProfileState: Codable, Equatable {
             includedPeerIds: [],
             featureFlags: [:],
             knowledgeIntegrations: [],
-            aiWorkflow: .focused,
-            aiApprovals: [:]
+            chatRangePreset: .sevenDays,
+            localTranscription: .defaultValue
         )
         return WorkspaceProfileState(
             schemaVersion: 3,
@@ -308,7 +359,6 @@ struct WorkspaceProfileState: Codable, Equatable {
 
 final class WorkspaceProfileStore {
     static let profileChatsFilterId = Int32.min
-    static let aiInboxFilterId = Int32.min + 1
     private static let registryLock = NSLock()
     private static var registry: [Int64: WorkspaceProfileStore] = [:]
 
@@ -326,7 +376,6 @@ final class WorkspaceProfileStore {
     private let storageKey: String
     private let value: Atomic<WorkspaceProfileState>
     private let promise: ValuePromise<WorkspaceProfileState>
-    private let aiInboxBadgeCount = Atomic<Int>(value: 0)
 
     private init(accountId: Int64) {
         self.storageKey = "workspace-profiles.v1.\(accountId)"
@@ -390,8 +439,8 @@ final class WorkspaceProfileStore {
                 includedPeerIds: [],
                 featureFlags: [:],
                 knowledgeIntegrations: [],
-                aiWorkflow: .focused,
-                aiApprovals: [:]
+                chatRangePreset: .sevenDays,
+            localTranscription: .defaultValue
             )
             state.profiles.append(profile)
             state.activeProfileId = profile.id
@@ -422,25 +471,9 @@ final class WorkspaceProfileStore {
         }
     }
 
-    func updateAIInboxBadgeCount(_ count: Int) {
-        let normalized = min(max(count, 0), 99)
-        var changed = false
-        _ = aiInboxBadgeCount.modify { current in
-            changed = current != normalized
-            return normalized
-        }
-        if changed {
-            promise.set(current)
-        }
-    }
-
     func addObsidianIntegration() {
         updateActive { profile in
             profile.knowledgeIntegrations.append(.obsidian())
-            // Adding knowledge is an explicit request to use Codex from the composer.
-            // Enable the two read-only composer capabilities so setup is not split across sections.
-            profile.featureFlags[WorkspaceAIFeature.chatSummaries.rawValue] = true
-            profile.featureFlags[WorkspaceAIFeature.replyDrafts.rawValue] = true
         }
     }
 
@@ -477,30 +510,6 @@ final class WorkspaceProfileStore {
         )
     }
 
-    func aiInboxFilter(for profile: WorkspaceProfile? = nil) -> ChatListFilter {
-        let profile = profile ?? current.activeProfile
-        let badgeCount = aiInboxBadgeCount.with { $0 }
-        var includePeers = ChatListFilterIncludePeers()
-        includePeers.setPeers(profile.includedPeerIds.map(PeerId.init).filter { $0.namespace != Namespaces.Peer.SecretChat })
-        let data = ChatListFilterData(
-            isShared: false,
-            hasSharedLinks: false,
-            categories: [],
-            excludeMuted: false,
-            excludeRead: false,
-            excludeArchived: false,
-            includePeers: includePeers,
-            excludePeers: [],
-            color: nil
-        )
-        return .filter(
-            id: WorkspaceProfileStore.aiInboxFilterId,
-            title: ChatFolderTitle(text: badgeCount == 0 ? "AI Inbox" : "AI Inbox \(badgeCount)", entities: [], enableAnimations: true),
-            emoticon: "✨",
-            data: data
-        )
-    }
-
     private func includingProfileChats(_ filter: ChatListFilter, profile: WorkspaceProfile) -> ChatListFilter {
         guard case let .filter(id, title, emoticon, sourceData) = filter else {
             return filter
@@ -514,16 +523,16 @@ final class WorkspaceProfileStore {
 
     func visibleFilters(_ filters: [ChatListFilter]) -> [ChatListFilter] {
         let profile = current.activeProfile
+        let profileFilter = profileChatsFilter(for: profile)
         var visible = filters.filter { profile.displays(folderId: $0.id) }.map {
             includingProfileChats($0, profile: profile)
         }
-        if visible.isEmpty, let allChats = filters.first(where: { $0.isAllChats }) {
+        if visible.isEmpty, profileFilter == nil, let allChats = filters.first(where: { $0.isAllChats }) {
             visible = [allChats]
         }
-        if let profileFilter = profileChatsFilter(for: profile) {
+        if let profileFilter {
             visible.insert(profileFilter, at: 0)
         }
-        visible.insert(aiInboxFilter(for: profile), at: min(visible.count, profileChatsFilter(for: profile) == nil ? 0 : 1))
         return visible
     }
 }
@@ -722,6 +731,7 @@ protocol WorkspaceACPRequestHandler: AnyObject {
 final class WorkspaceACPClient {
     private let queue = DispatchQueue(label: "telegram.workspace-acp")
     private let statusPromise = ValuePromise<WorkspaceACPStatus>(.disconnected, ignoreRepeated: true)
+    private let modelsPromise = ValuePromise<[WorkspaceACPModel]>([], ignoreRepeated: true)
     private let eventPipe = ValuePipe<WorkspaceACPEvent>()
     private var process: Process?
     private var input: FileHandle?
@@ -738,6 +748,12 @@ final class WorkspaceACPClient {
 
     var status: Signal<WorkspaceACPStatus, NoError> {
         return statusPromise.get()
+    }
+
+    /// Models the agent advertised on its last successful session. Empty when the agent does
+    /// not report any, in which case the picker falls back to the provider's known list.
+    var models: Signal<[WorkspaceACPModel], NoError> {
+        return modelsPromise.get()
     }
 
     /// Streams agent response chunks, plans, task/tool updates, and future ACP update types.
@@ -838,7 +854,7 @@ final class WorkspaceACPClient {
         let outputPipe = Pipe()
         let errorPipe = Pipe()
         process.executableURL = URL(fileURLWithPath: configuration.executable)
-        process.arguments = configuration.arguments
+        process.arguments = configuration.launchArguments
         process.currentDirectoryURL = URL(fileURLWithPath: configuration.workingDirectory, isDirectory: true)
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
@@ -945,7 +961,28 @@ final class WorkspaceACPClient {
                 return
             }
             self.sessionId = sessionId
+            self.modelsPromise.set(WorkspaceACPClient.parseModels(from: result))
             self.statusPromise.set(.connected(agentName: self.agentName ?? configuration.provider.title))
+        }
+    }
+
+    /// ACP agents report their model list in more than one shape, so accept either a bare array
+    /// or an object wrapping one, and tolerate both `modelId` and `id` spellings.
+    private static func parseModels(from result: [String: Any]) -> [WorkspaceACPModel] {
+        let raw: [[String: Any]]
+        if let array = result["models"] as? [[String: Any]] {
+            raw = array
+        } else if let object = result["models"] as? [String: Any] {
+            raw = (object["availableModels"] as? [[String: Any]]) ?? (object["models"] as? [[String: Any]]) ?? []
+        } else {
+            raw = (result["availableModels"] as? [[String: Any]]) ?? []
+        }
+        return raw.compactMap { entry in
+            guard let id = (entry["modelId"] as? String) ?? (entry["id"] as? String), !id.isEmpty else {
+                return nil
+            }
+            let name = (entry["name"] as? String) ?? (entry["displayName"] as? String) ?? id
+            return WorkspaceACPModel(id: id, name: name)
         }
     }
 
@@ -1149,9 +1186,10 @@ enum WorkspaceMessageSender {
 
 private let workspaceProfileNameId = InputDataIdentifier("workspace.profile.name")
 private let workspaceACPExecutableId = InputDataIdentifier("workspace.acp.executable")
+private let workspaceTranscriptionEndpointId = InputDataIdentifier("workspace.transcription.endpoint")
+private let workspaceTranscriptionModelId = InputDataIdentifier("workspace.transcription.model")
 private let workspaceACPArgumentsId = InputDataIdentifier("workspace.acp.arguments")
 private let workspaceACPDirectoryId = InputDataIdentifier("workspace.acp.directory")
-private let workspaceAIInstructionsId = InputDataIdentifier("workspace.ai.instructions")
 
 private func workspaceIntegrationPathId(_ integrationId: String) -> InputDataIdentifier {
     return InputDataIdentifier("workspace.integration.\(integrationId).path")
@@ -1166,6 +1204,7 @@ private func workspaceProfileEntries(
     state: WorkspaceProfileState,
     filters: [ChatListFilter],
     acpStatus: WorkspaceACPStatus,
+    acpModels: [WorkspaceACPModel],
     store: WorkspaceProfileStore,
     client: WorkspaceACPClient
 ) -> [InputDataEntry] {
@@ -1177,12 +1216,12 @@ private func workspaceProfileEntries(
     sectionId += 1
     entries.append(.desc(sectionId: sectionId, index: index, text: .plain("PROFILES"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
     index += 1
-    for profile in state.profiles {
+    for (position, profile) in state.profiles.enumerated() {
         entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.profile.\(profile.id)"), data: .init(
             name: profile.name,
             color: theme.colors.text,
             type: .selectable(profile.id == state.activeProfileId),
-            viewType: bestGeneralViewType(state.profiles, for: profile),
+            viewType: position == 0 ? .firstItem : .innerItem,
             action: { store.activate(profile.id) },
             menuItems: profile.kind == .custom ? {
                 return [ContextMenuItem("Delete Profile", handler: { store.remove(profile.id) }, itemMode: .destruct)]
@@ -1190,26 +1229,26 @@ private func workspaceProfileEntries(
         )))
         index += 1
     }
-    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.profile.add"), data: .init(name: "Add Custom Profile", color: theme.colors.accent, type: .none, viewType: .singleItem, action: store.addCustomProfile)))
+    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.profile.add"), data: .init(name: "Add Custom Profile", color: theme.colors.accent, type: .none, viewType: state.profiles.isEmpty ? .singleItem : .lastItem, action: store.addCustomProfile)))
     index += 1
 
     entries.append(.sectionId(sectionId, type: .normal))
     sectionId += 1
     let active = state.activeProfile
     if active.kind == .custom {
-        entries.append(.input(sectionId: sectionId, index: index, value: .string(active.name), error: nil, identifier: workspaceProfileNameId, mode: .plain, data: .init(viewType: .singleItem), placeholder: nil, inputPlaceholder: "Profile name", filter: { $0 }, limit: 64))
+        entries.append(.input(sectionId: sectionId, index: index, value: .string(active.name), error: nil, identifier: workspaceProfileNameId, mode: .plain, data: .init(viewType: .firstItem), placeholder: nil, inputPlaceholder: "Profile name", filter: { $0 }, limit: 64))
         index += 1
     }
-    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.notifications"), data: .init(name: "Receive Notifications", color: theme.colors.text, type: .switchable(active.receivesNotifications), viewType: .singleItem, action: {
+    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.notifications"), data: .init(name: "Receive Notifications", color: theme.colors.text, type: .switchable(active.receivesNotifications), viewType: active.kind == .custom ? .innerItem : .firstItem, action: {
         store.updateActive { $0.receivesNotifications.toggle() }
     }, autoswitch: false)))
     index += 1
-    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.stories"), data: .init(name: "Show Stories", color: theme.colors.text, type: .switchable(active.showsStories), viewType: .singleItem, action: {
+    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.stories"), data: .init(name: "Show Stories", color: theme.colors.text, type: .switchable(active.showsStories), viewType: .innerItem, action: {
         store.updateActive { $0.showsStories.toggle() }
     }, autoswitch: false)))
     index += 1
     let profileChatCount = active.includedPeerIds.count
-    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.chats"), data: .init(name: "Profile Chats", color: theme.colors.text, type: .nextContext(profileChatCount == 0 ? "None" : "\(profileChatCount)"), viewType: .singleItem, action: {
+    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.chats"), data: .init(name: "Profile Chats", color: theme.colors.text, type: .nextContext(profileChatCount == 0 ? "None" : "\(profileChatCount)"), viewType: .lastItem, action: {
         let selectedPeerIds = Set(active.includedPeerIds.map(PeerId.init))
         let behavior = SelectChatsBehavior(settings: [.contacts, .remote, .groups, .channels, .bots], excludePeerIds: [], limit: 200)
         _ = selectModalPeers(
@@ -1231,6 +1270,9 @@ private func workspaceProfileEntries(
     index += 1
     entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Selected chats appear in a dedicated profile tab and are always included in this profile's folder views. If chats are selected, profile notifications are limited to them."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
     index += 1
+
+    entries.append(.sectionId(sectionId, type: .normal))
+    sectionId += 1
     entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.folders.all"), data: .init(name: "Show All Chat Folders", color: theme.colors.text, type: .switchable(active.showsAllFolders), viewType: .singleItem, action: {
         store.updateActive { $0.showsAllFolders.toggle() }
     }, autoswitch: false)))
@@ -1238,8 +1280,8 @@ private func workspaceProfileEntries(
     if !active.showsAllFolders {
         entries.append(.desc(sectionId: sectionId, index: index, text: .plain("VISIBLE CHAT FOLDERS"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
         index += 1
-        for filter in filters {
-            entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.folder.\(filter.id)"), data: .init(name: filter.title, color: theme.colors.text, type: .switchable(active.visibleFolderIds.contains(filter.id)), viewType: bestGeneralViewType(filters, for: filter), action: {
+        for (position, filter) in filters.enumerated() {
+            entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.folder.\(filter.id)"), data: .init(name: filter.title, color: theme.colors.text, type: .switchable(active.visibleFolderIds.contains(filter.id)), viewType: bestGeneralViewType(filters, for: position), action: {
                 store.updateActive { profile in
                     if let position = profile.visibleFolderIds.firstIndex(of: filter.id) {
                         profile.visibleFolderIds.remove(at: position)
@@ -1254,149 +1296,78 @@ private func workspaceProfileEntries(
 
     entries.append(.sectionId(sectionId, type: .normal))
     sectionId += 1
-    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("AI WORKFLOW"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
+    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("CHAT ACTIONS"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
     index += 1
-    for preset in [WorkspaceAIWorkflowPreset.focused, .proactive, .scheduled] {
-        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.ai.preset.\(preset.rawValue)"), data: .init(
-            name: preset.title,
+    let chatActions = CodexAssistantAction.configurable
+    for (position, chatAction) in chatActions.enumerated() {
+        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.\(chatAction.flagKey)"), data: .init(
+            name: chatAction.title,
             color: theme.colors.text,
-            type: .selectable(active.aiWorkflow.preset == preset),
-            viewType: .singleItem,
-            action: { store.updateActive { $0.aiWorkflow = .preset(preset) } }
-        )))
-        index += 1
-    }
-    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.ai.on-open"), data: .init(name: "Generate on App Open", color: theme.colors.text, type: .switchable(active.aiWorkflow.generateOnOpen), viewType: .singleItem, action: {
-        store.updateActive {
-            $0.aiWorkflow.generateOnOpen.toggle()
-            $0.aiWorkflow.preset = .custom
-        }
-    }, autoswitch: false)))
-    index += 1
-    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.ai.background"), data: .init(name: "Background While App Runs", color: theme.colors.text, type: .switchable(active.aiWorkflow.backgroundEnabled), viewType: .singleItem, action: {
-        store.updateActive {
-            $0.aiWorkflow.backgroundEnabled.toggle()
-            $0.aiWorkflow.preset = .custom
-        }
-    }, autoswitch: false)))
-    index += 1
-    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.ai.background.interval"), data: .init(name: "Background Interval", color: theme.colors.text, type: .nextContext("Every \(active.aiWorkflow.backgroundIntervalMinutes) min"), viewType: .singleItem, action: {
-        store.updateActive { profile in
-            let values = [15, 30, 60]
-            let current = values.firstIndex(of: profile.aiWorkflow.backgroundIntervalMinutes) ?? 0
-            profile.aiWorkflow.backgroundIntervalMinutes = values[(current + 1) % values.count]
-            profile.aiWorkflow.preset = .custom
-        }
-    })))
-    index += 1
-    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.ai.window"), data: .init(name: "Automatic Range", color: theme.colors.text, type: .nextContext(active.aiWorkflow.automaticRollingWindow.title), viewType: .singleItem, action: {
-        store.updateActive { profile in
-            let values = WorkspaceAIRollingWindow.allCases
-            let current = values.firstIndex(of: profile.aiWorkflow.automaticRollingWindow) ?? 0
-            profile.aiWorkflow.automaticRollingWindow = values[(current + 1) % values.count]
-            profile.aiWorkflow.preset = .custom
-        }
-    })))
-    index += 1
-    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.ai.max-chats"), data: .init(name: "Maximum Chats Per Run", color: theme.colors.text, type: .nextContext("\(active.aiWorkflow.maxChatsPerRun)"), viewType: .singleItem, action: {
-        store.updateActive { profile in
-            let values = [5, 10, 20, 50]
-            let current = values.firstIndex(of: profile.aiWorkflow.maxChatsPerRun) ?? 0
-            profile.aiWorkflow.maxChatsPerRun = values[(current + 1) % values.count]
-            profile.aiWorkflow.preset = .custom
-        }
-    })))
-    index += 1
-    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.ai.scheduled"), data: .init(name: "Scheduled Digests", color: theme.colors.text, type: .switchable(!active.aiWorkflow.scheduledTriggers.isEmpty), viewType: .singleItem, action: {
-        store.updateActive { profile in
-            if profile.aiWorkflow.scheduledTriggers.isEmpty {
-                profile.aiWorkflow.scheduledTriggers = WorkspaceAIWorkflowSettings.scheduled.scheduledTriggers
-            } else {
-                profile.aiWorkflow.scheduledTriggers = []
-            }
-            profile.aiWorkflow.preset = .custom
-        }
-    }, autoswitch: false)))
-    index += 1
-    for trigger in active.aiWorkflow.scheduledTriggers {
-        let hour = trigger.minutesFromMidnight / 60
-        let minute = trigger.minutesFromMidnight % 60
-        entries.append(.desc(sectionId: sectionId, index: index, text: .plain(String(format: "Weekdays at %02d:%02d · %@", hour, minute, trigger.rollingWindow.title)), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
-        index += 1
-    }
-    entries.append(.input(sectionId: sectionId, index: index, value: .string(active.aiWorkflow.profileInstructions), error: nil, identifier: workspaceAIInstructionsId, mode: .plain, data: .init(viewType: .singleItem), placeholder: nil, inputPlaceholder: "What the AI Inbox should prioritize", filter: { $0 }, limit: 4096))
-    index += 1
-    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Automatic ranges are rolling windows. Manual generation always uses the exact inclusive From and To dates you choose. Background work only runs while TelegramWork is open."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
-    index += 1
-
-    entries.append(.sectionId(sectionId, type: .normal))
-    sectionId += 1
-    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("AI FEATURES"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
-    index += 1
-    for feature in WorkspaceAIFeature.allCases {
-        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.\(feature.rawValue)"), data: .init(
-            name: feature.title,
-            color: theme.colors.text,
-            type: .switchable(active.isEnabled(feature)),
-            viewType: .singleItem,
+            type: .switchable(active.isEnabled(chatAction)),
+            /// The range row closes this block, so no action row is ever `.lastItem`.
+            viewType: position == 0 ? .firstItem : .innerItem,
+            description: chatAction.settingsSubtitle,
             action: {
                 store.updateActive { profile in
-                    profile.featureFlags[feature.rawValue] = !profile.isEnabled(feature)
+                    profile.featureFlags[chatAction.flagKey] = !profile.isEnabled(chatAction)
                 }
             },
             autoswitch: false
         )))
         index += 1
     }
-    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Profile-scoped capabilities advertised to connected AI agents. Read and write integrations must still be registered explicitly; enabling a capability never sends chat data by itself."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
-    index += 1
-
-    entries.append(.sectionId(sectionId, type: .normal))
-    sectionId += 1
-    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("AI ACTION APPROVALS"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
-    index += 1
-    for capability in WorkspaceAICapability.allCases {
-        let decision = active.approvalDecision(for: capability)
-        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.approval.\(capability.rawValue)"), data: .init(
-            name: capability.title,
-            color: theme.colors.text,
-            type: .nextContext(decision.title),
-            viewType: .singleItem,
-            action: {
-                store.updateActive { profile in
-                    switch profile.approvalDecision(for: capability) {
-                    case .ask:
-                        profile.aiApprovals[capability.rawValue] = .allowAlways
-                    case .allowAlways:
-                        profile.aiApprovals[capability.rawValue] = .neverAllow
-                    case .neverAllow:
-                        profile.aiApprovals[capability.rawValue] = .ask
-                    }
-                }
-            }
-        )))
-        index += 1
-    }
-    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.follow-up.macos-alerts"), data: .init(
-        name: "macOS Follow-up Alerts",
+    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.chat.range"), data: .init(
+        name: "Range When Not Today",
         color: theme.colors.text,
-        type: .switchable(active.aiWorkflow.macOSNotificationsEnabled),
-        viewType: .singleItem,
+        type: .nextContext(active.chatRangePreset.title),
+        viewType: chatActions.isEmpty ? .singleItem : .lastItem,
+        description: "How far back the panel looks once you clear Today",
         action: {
-            store.updateActive { $0.aiWorkflow.macOSNotificationsEnabled.toggle() }
-        },
-        autoswitch: false
+            store.updateActive { profile in
+                let values = WorkspaceChatRangePreset.allCases
+                let current = values.firstIndex(of: profile.chatRangePreset) ?? 0
+                profile.chatRangePreset = values[(current + 1) % values.count]
+            }
+        }
     )))
     index += 1
-    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Click a capability to cycle Ask Every Time → Always Allow → Never Allow. Sending and scheduling always show the proposed text in the approval warning unless this profile explicitly remembers permission."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
+    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Which buttons appear in the agent panel inside a chat, and how far back it looks when you clear the Today checkbox. Voice to text and Generate image are off until you turn them on."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
     index += 1
+
+    if active.isEnabled(.voiceToText) {
+        entries.append(.sectionId(sectionId, type: .normal))
+        sectionId += 1
+        entries.append(.desc(sectionId: sectionId, index: index, text: .plain("LOCAL TRANSCRIPTION"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
+        index += 1
+        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.transcription.enabled"), data: .init(
+            name: "Use a Local Model",
+            color: theme.colors.text,
+            type: .switchable(active.localTranscription.isEnabled),
+            viewType: active.localTranscription.isEnabled ? .firstItem : .singleItem,
+            description: "Send voice notes to a speech-to-text server on this Mac instead of Telegram",
+            action: {
+                store.updateActive { $0.localTranscription.isEnabled.toggle() }
+            },
+            autoswitch: false
+        )))
+        index += 1
+        if active.localTranscription.isEnabled {
+            entries.append(.input(sectionId: sectionId, index: index, value: .string(active.localTranscription.endpoint), error: nil, identifier: workspaceTranscriptionEndpointId, mode: .plain, data: .init(viewType: .innerItem), placeholder: InputDataInputPlaceholder("Endpoint"), inputPlaceholder: "http://127.0.0.1:8080/v1/audio/transcriptions", filter: { $0 }, limit: 1024))
+            index += 1
+            entries.append(.input(sectionId: sectionId, index: index, value: .string(active.localTranscription.model), error: nil, identifier: workspaceTranscriptionModelId, mode: .plain, data: .init(viewType: .lastItem), placeholder: InputDataInputPlaceholder("Model"), inputPlaceholder: "whisper-1", filter: { $0 }, limit: 256))
+            index += 1
+        }
+        entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Works with any OpenAI-compatible transcription server — whisper.cpp, faster-whisper-server, LocalAI, Speaches. Audio never leaves this Mac and Telegram Premium is not required. When this is off, Voice to text uses Telegram's own transcription, which needs Premium."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
+        index += 1
+    }
+
 
     entries.append(.sectionId(sectionId, type: .normal))
     sectionId += 1
     entries.append(.desc(sectionId: sectionId, index: index, text: .plain("KNOWLEDGE INTEGRATIONS"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
     index += 1
     if active.knowledgeIntegrations.isEmpty {
-        entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Connect local knowledge to this profile. Add a vault, provide its folder path and plain-language instructions, and TelegramWork configures both local retrieval and Codex tools."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
+        entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Connect local knowledge to this profile. Add a vault, provide its folder path and plain-language instructions, and TelegramWork configures both local retrieval and agent tools."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
         index += 1
     }
     for integration in active.knowledgeIntegrations {
@@ -1416,7 +1387,7 @@ private func workspaceProfileEntries(
             }
         }, autoswitch: false)))
         index += 1
-        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.integration.\(integration.id).codex-tools"), data: .init(name: "Expose Read-Only Tools to Codex", color: theme.colors.text, type: .switchable(integration.exposesCodexTools), viewType: .lastItem, action: {
+        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.integration.\(integration.id).codex-tools"), data: .init(name: "Expose Read-Only Tools to the Agent", color: theme.colors.text, type: .switchable(integration.exposesCodexTools), viewType: .lastItem, action: {
             client.disconnect()
             store.updateActive { profile in
                 guard let position = profile.knowledgeIntegrations.firstIndex(where: { $0.id == integration.id }) else { return }
@@ -1424,9 +1395,12 @@ private func workspaceProfileEntries(
             }
         }, autoswitch: false)))
         index += 1
+
+        entries.append(.sectionId(sectionId, type: .normal))
+        sectionId += 1
         entries.append(.input(sectionId: sectionId, index: index, value: .string(integration.rootPath), error: nil, identifier: workspaceIntegrationPathId(integration.id), mode: .plain, data: .init(viewType: .firstItem), placeholder: nil, inputPlaceholder: "Obsidian vault folder path", filter: { $0 }, limit: 4096))
         index += 1
-        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.integration.\(integration.id).choose"), data: .init(name: "Choose Vault Folder…", color: theme.colors.accent, type: .next, viewType: .lastItem, action: {
+        entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.integration.\(integration.id).choose"), data: .init(name: "Choose Vault Folder…", color: theme.colors.accent, type: .next, viewType: .innerItem, action: {
             filePanel(with: [], canChooseDirectories: true, for: context.window, completion: { paths in
                 guard let path = paths?.first else { return }
                 client.disconnect()
@@ -1437,11 +1411,11 @@ private func workspaceProfileEntries(
             })
         })))
         index += 1
-        entries.append(.input(sectionId: sectionId, index: index, value: .string(integration.instructions), error: nil, identifier: workspaceIntegrationInstructionsId(integration.id), mode: .plain, data: .init(viewType: .singleItem), placeholder: nil, inputPlaceholder: "Instructions for Codex", filter: { $0 }, limit: 4096))
+        entries.append(.input(sectionId: sectionId, index: index, value: .string(integration.instructions), error: nil, identifier: workspaceIntegrationInstructionsId(integration.id), mode: .plain, data: .init(viewType: .lastItem), placeholder: nil, inputPlaceholder: "Instructions for the agent", filter: { $0 }, limit: 4096))
         index += 1
         let integrationStatus: String
         if integration.rootPath.isEmpty {
-            integrationStatus = "Choose your Obsidian vault folder. Instructions describe how Codex should interpret and cite this knowledge."
+            integrationStatus = "Choose your Obsidian vault folder. Instructions describe how the agent should interpret and cite this knowledge."
         } else if integration.hasValidRoot {
             integrationStatus = "Ready · Markdown only · local search and bundled MCP access are read-only. Reconnect the agent after changing this integration."
         } else {
@@ -1449,12 +1423,18 @@ private func workspaceProfileEntries(
         }
         entries.append(.desc(sectionId: sectionId, index: index, text: .plain(integrationStatus), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
         index += 1
+
+        entries.append(.sectionId(sectionId, type: .normal))
+        sectionId += 1
         entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.integration.\(integration.id).remove"), data: .init(name: "Remove \(integration.kind.title)", color: theme.colors.redUI, type: .none, viewType: .singleItem, action: {
             client.disconnect()
             store.removeIntegration(integration.id)
         })))
         index += 1
     }
+
+    entries.append(.sectionId(sectionId, type: .normal))
+    sectionId += 1
     entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.integration.add.obsidian"), data: .init(name: "Add Obsidian Vault", color: theme.colors.accent, type: .none, viewType: .singleItem, action: {
         client.disconnect()
         store.addObsidianIntegration()
@@ -1465,12 +1445,13 @@ private func workspaceProfileEntries(
     sectionId += 1
     entries.append(.desc(sectionId: sectionId, index: index, text: .plain("AI AGENT · AGENT CLIENT PROTOCOL"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
     index += 1
-    for provider in WorkspaceACPProvider.allCases {
+    let providers = WorkspaceACPProvider.allCases
+    for (position, provider) in providers.enumerated() {
         entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.acp.provider.\(provider.rawValue)"), data: .init(
             name: provider.title,
             color: theme.colors.text,
             type: .selectable(provider == state.acp.provider),
-            viewType: .singleItem,
+            viewType: bestGeneralViewType(providers, for: position),
             action: {
                 client.disconnect()
                 store.updateACP { $0.selectProvider(provider) }
@@ -1478,11 +1459,73 @@ private func workspaceProfileEntries(
         )))
         index += 1
     }
-    entries.append(.input(sectionId: sectionId, index: index, value: .string(state.acp.executable), error: nil, identifier: workspaceACPExecutableId, mode: .plain, data: .init(viewType: .firstItem), placeholder: nil, inputPlaceholder: "ACP executable", filter: { $0 }, limit: 1024))
+
+    entries.append(.sectionId(sectionId, type: .normal))
+    sectionId += 1
+    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("AGENT COMMAND"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
     index += 1
-    entries.append(.input(sectionId: sectionId, index: index, value: .string(state.acp.arguments.joined(separator: " ")), error: nil, identifier: workspaceACPArgumentsId, mode: .plain, data: .init(viewType: .innerItem), placeholder: nil, inputPlaceholder: "Arguments", filter: { $0 }, limit: 2048))
+    entries.append(.input(sectionId: sectionId, index: index, value: .string(state.acp.executable), error: nil, identifier: workspaceACPExecutableId, mode: .plain, data: .init(viewType: .firstItem), placeholder: InputDataInputPlaceholder("Program"), inputPlaceholder: "ACP executable", filter: { $0 }, limit: 1024))
     index += 1
-    entries.append(.input(sectionId: sectionId, index: index, value: .string(state.acp.workingDirectory), error: nil, identifier: workspaceACPDirectoryId, mode: .plain, data: .init(viewType: .lastItem), placeholder: nil, inputPlaceholder: "Working directory", filter: { $0 }, limit: 2048))
+    entries.append(.input(sectionId: sectionId, index: index, value: .string(state.acp.arguments.joined(separator: " ")), error: nil, identifier: workspaceACPArgumentsId, mode: .plain, data: .init(viewType: .innerItem), placeholder: InputDataInputPlaceholder("Arguments"), inputPlaceholder: "Arguments", filter: { $0 }, limit: 2048))
+    index += 1
+    entries.append(.input(sectionId: sectionId, index: index, value: .string(state.acp.workingDirectory), error: nil, identifier: workspaceACPDirectoryId, mode: .plain, data: .init(viewType: .innerItem), placeholder: InputDataInputPlaceholder("Folder"), inputPlaceholder: "Working directory", filter: { $0 }, limit: 2048))
+    index += 1
+    /// Prefer what the connected agent reported; fall back to the provider's known list.
+    let discovered = acpModels.map { WorkspaceACPModel(id: $0.id, name: $0.name) }
+    let offered = !discovered.isEmpty
+        ? discovered
+        : state.acp.provider.suggestedModels.map { WorkspaceACPModel(id: $0, name: $0) }
+    let selectedModelTitle = state.acp.model.isEmpty
+        ? "Agent default"
+        : (offered.first(where: { $0.id == state.acp.model })?.name ?? state.acp.model)
+    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.acp.model"), data: .init(
+        name: "Model",
+        color: theme.colors.text,
+        type: .contextSelector(selectedModelTitle, {
+            var items: [ContextMenuItem] = []
+            let agentDefault = ContextMenuItem("Agent default", handler: {
+                client.disconnect()
+                store.updateACP { $0.model = "" }
+            })
+            agentDefault.state = state.acp.model.isEmpty ? .on : .off
+            items.append(agentDefault)
+            for entry in offered {
+                let item = ContextMenuItem(entry.name, handler: {
+                    client.disconnect()
+                    store.updateACP { $0.model = entry.id }
+                })
+                item.state = entry.id == state.acp.model ? .on : .off
+                items.append(item)
+            }
+            /// A model the agent knows about but we have never seen must still be selectable.
+            if !state.acp.model.isEmpty, !offered.contains(where: { $0.id == state.acp.model }) {
+                let item = ContextMenuItem(state.acp.model, handler: {})
+                item.state = .on
+                items.insert(item, at: 1)
+            }
+            return items
+        }()),
+        viewType: .lastItem
+    )))
+    index += 1
+    let acpHint: String
+    if state.acp.provider == .custom {
+        acpHint = "The program TelegramWork starts to run this agent, the folder it treats as its project root, and the model to request. Enter the command for your own ACP agent here. The model list is read from the agent once it connects."
+    } else {
+        acpHint = "The program TelegramWork starts to run \(state.acp.provider.title), the folder it treats as its project root, and the model to request. The model list is read from the agent once it connects; the rest is filled in for you."
+    }
+    entries.append(.desc(sectionId: sectionId, index: index, text: .plain(acpHint), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
+    index += 1
+
+    entries.append(.sectionId(sectionId, type: .normal))
+    sectionId += 1
+    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.acp.auto-connect"), data: .init(name: "Connect Agent Automatically", color: theme.colors.text, type: .switchable(state.acp.autoConnect), viewType: .firstItem, action: {
+        let wasEnabled = store.current.acp.autoConnect
+        store.updateACP { $0.autoConnect.toggle() }
+        if wasEnabled {
+            client.disconnect()
+        }
+    }, autoswitch: false)))
     index += 1
     let isConnected: Bool
     switch acpStatus {
@@ -1491,12 +1534,13 @@ private func workspaceProfileEntries(
     default:
         isConnected = false
     }
-    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.acp.connect"), data: .init(name: isConnected ? "Disconnect Agent" : "Connect to \(state.acp.provider.title)", color: theme.colors.accent, type: .nextContext(acpStatus.title), viewType: .singleItem, action: {
+    entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.acp.connect"), data: .init(name: isConnected ? "Disconnect Agent" : "Connect to \(state.acp.provider.title)", color: theme.colors.accent, type: .nextContext(acpStatus.title), viewType: .lastItem, action: {
         if isConnected {
+            store.updateACP { $0.autoConnect = false }
             client.disconnect()
         } else {
             let current = store.current
-            let features = WorkspaceAIFeature.allCases.filter { current.activeProfile.isEnabled($0) }
+            let features = current.activeProfile.advertisedFeatures
             client.connect(configuration: current.acp, enabledFeatures: features, knowledgeIntegrations: current.activeProfile.knowledgeIntegrations, permissionHandler: { title, options, completion in
                 DispatchQueue.main.async {
                     guard let allow = options.first(where: { $0.kind == "allow_once" }) ?? options.first(where: { $0.kind == "allow_always" }) else {
@@ -1520,6 +1564,8 @@ private func workspaceProfileEntries(
     index += 1
     if case let .authenticationRequired(_, methods) = acpStatus {
         for method in methods {
+            entries.append(.sectionId(sectionId, type: .normal))
+            sectionId += 1
             entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.acp.auth.\(method.id)"), data: .init(name: "Sign in with \(method.name)", color: theme.colors.accent, type: .none, viewType: .singleItem, action: {
                 client.authenticate(methodId: method.id)
             })))
@@ -1530,16 +1576,8 @@ private func workspaceProfileEntries(
             }
         }
     }
-    let command = ([state.acp.executable] + state.acp.arguments).joined(separator: " ")
-    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Uses Agent Client Protocol v1 over stdio. Command: \(command). Telegram capabilities are extension points for WorkspaceACPRequestHandler implementations."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
-    index += 1
-
     entries.append(.sectionId(sectionId, type: .normal))
     sectionId += 1
-    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("TIMED MESSAGES"), data: .init(color: theme.colors.listGrayText, detectBold: true, viewType: .textTopItem)))
-    index += 1
-    entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Use Send Later in any chat. Timed messages are stored by Telegram and fire even when this app is closed; integrations can call WorkspaceMessageScheduler for the same behavior."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
-    index += 1
     return entries
 }
 
@@ -1548,9 +1586,9 @@ func WorkspaceProfilesController(context: AccountContext) -> InputDataController
     let store = WorkspaceProfileStore.shared(accountId: accountId)
     let client = WorkspaceACPRegistry.shared.client(accountId: accountId)
     let filters = chatListFilterPreferences(engine: context.engine) |> map { $0.list }
-    let signal = combineLatest(queue: prepareQueue, appearanceSignal, store.signal, filters, client.status)
-    |> map { _, state, filters, acpStatus in
-        return InputDataSignalValue(entries: workspaceProfileEntries(context: context, state: state, filters: filters, acpStatus: acpStatus, store: store, client: client))
+    let signal = combineLatest(queue: prepareQueue, appearanceSignal, store.signal, filters, client.status, client.models)
+    |> map { _, state, filters, acpStatus, acpModels in
+        return InputDataSignalValue(entries: workspaceProfileEntries(context: context, state: state, filters: filters, acpStatus: acpStatus, acpModels: acpModels, store: store, client: client))
     }
     let controller = InputDataController(dataSignal: signal, title: "Profiles & Automation", removeAfterDisappear: false, hasDone: false, identifier: "workspace_profiles")
     controller.updateDatas = { data in
@@ -1572,13 +1610,12 @@ func WorkspaceProfilesController(context: AccountContext) -> InputDataController
                 configuration.workingDirectory = directory
             }
         }
-        if let instructions = data[workspaceAIInstructionsId]?.stringValue {
-            store.updateActive { profile in
-                let trimmed = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
-                if profile.aiWorkflow.profileInstructions != trimmed {
-                    profile.aiWorkflow.profileInstructions = trimmed
-                    profile.aiWorkflow.preset = .custom
-                }
+        store.updateActive { profile in
+            if let endpoint = data[workspaceTranscriptionEndpointId]?.stringValue {
+                profile.localTranscription.endpoint = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            if let model = data[workspaceTranscriptionModelId]?.stringValue {
+                profile.localTranscription.model = model.trimmingCharacters(in: .whitespacesAndNewlines)
             }
         }
         let currentIntegrations = store.current.activeProfile.knowledgeIntegrations

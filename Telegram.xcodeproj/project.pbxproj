@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		F0C0DE0A2F7A000100000002 /* WorkspaceVoiceTranscriber.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0C0DE0B2F7A000100000002 /* WorkspaceVoiceTranscriber.swift */; };
 		2700B21E273AD71E003E4018 /* GroupCallNavigationHeaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7388431257E6E0C002E8424 /* GroupCallNavigationHeaderView.swift */; };
 		2700B222273ADC94003E4018 /* HotKey in Frameworks */ = {isa = PBXBuildFile; productRef = 2700B221273ADC94003E4018 /* HotKey */; };
 		270202BF261A1BF500CFCE6D /* PaymentsTipsRowItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 270202BE261A1BF500CFCE6D /* PaymentsTipsRowItem.swift */; };
@@ -1161,7 +1162,6 @@
 		A789E08423E05EAE00AEB34A /* ChatListFiltersListController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A789E08323E05EAE00AEB34A /* ChatListFiltersListController.swift */; };
 		F0C0DE012F7A000100000001 /* WorkspaceProfiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0C0DE022F7A000100000001 /* WorkspaceProfiles.swift */; };
 		F0C0DE052F7A000100000001 /* WorkspaceAI.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0C0DE062F7A000100000001 /* WorkspaceAI.swift */; };
-		F0C0DE072F7A000100000001 /* WorkspaceAIInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0C0DE082F7A000100000001 /* WorkspaceAIInbox.swift */; };
 		F0C0DE032F7A000100000001 /* telegramwork_knowledge_mcp.py in Resources */ = {isa = PBXBuildFile; fileRef = F0C0DE042F7A000100000001 /* telegramwork_knowledge_mcp.py */; };
 		A7919138240D1077002011CA /* ChatListFilterPredicate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7919137240D1077002011CA /* ChatListFilterPredicate.swift */; };
 		A7ADC47A2587B3750069737A /* VoiceChatActionButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7ADC4792587B3750069737A /* VoiceChatActionButton.swift */; };
@@ -1740,6 +1740,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		F0C0DE0B2F7A000100000002 /* WorkspaceVoiceTranscriber.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceVoiceTranscriber.swift; sourceTree = "<group>"; };
 		2700B21F273ADC08003E4018 /* HotKey */ = {isa = PBXFileReference; lastKnownFileType = folder; name = HotKey; path = packages/HotKey; sourceTree = "<group>"; };
 		270202BE261A1BF500CFCE6D /* PaymentsTipsRowItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentsTipsRowItem.swift; sourceTree = "<group>"; };
 		270202C2261B3D3100CFCE6D /* CurrencyUITextFieldDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = CurrencyUITextFieldDelegate.swift; sourceTree = "<group>"; };
@@ -2833,7 +2834,6 @@
 		A789E08323E05EAE00AEB34A /* ChatListFiltersListController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatListFiltersListController.swift; sourceTree = "<group>"; };
 		F0C0DE022F7A000100000001 /* WorkspaceProfiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceProfiles.swift; sourceTree = "<group>"; };
 		F0C0DE062F7A000100000001 /* WorkspaceAI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceAI.swift; sourceTree = "<group>"; };
-		F0C0DE082F7A000100000001 /* WorkspaceAIInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceAIInbox.swift; sourceTree = "<group>"; };
 		F0C0DE042F7A000100000001 /* telegramwork_knowledge_mcp.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = telegramwork_knowledge_mcp.py; sourceTree = "<group>"; };
 		A7919137240D1077002011CA /* ChatListFilterPredicate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatListFilterPredicate.swift; sourceTree = "<group>"; };
 		A7ADC4792587B3750069737A /* VoiceChatActionButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceChatActionButton.swift; sourceTree = "<group>"; };
@@ -4948,8 +4948,8 @@
 			children = (
 				A789E08323E05EAE00AEB34A /* ChatListFiltersListController.swift */,
 				F0C0DE022F7A000100000001 /* WorkspaceProfiles.swift */,
+				F0C0DE0B2F7A000100000002 /* WorkspaceVoiceTranscriber.swift */,
 				F0C0DE062F7A000100000001 /* WorkspaceAI.swift */,
-				F0C0DE082F7A000100000001 /* WorkspaceAIInbox.swift */,
 				F0C0DE042F7A000100000001 /* telegramwork_knowledge_mcp.py */,
 				D0FFC4AB23E184BA0044D305 /* ChatListFilterController.swift */,
 				A7919137240D1077002011CA /* ChatListFilterPredicate.swift */,
@@ -8331,8 +8331,8 @@
 				C295C65F1F75808600BA309D /* ChatAdditionController.swift in Sources */,
 				D001E974243B1A0A009025F9 /* LeftSidebarController.swift in Sources */,
 				F0C0DE012F7A000100000001 /* WorkspaceProfiles.swift in Sources */,
+				F0C0DE0A2F7A000100000002 /* WorkspaceVoiceTranscriber.swift in Sources */,
 				F0C0DE052F7A000100000001 /* WorkspaceAI.swift in Sources */,
-				F0C0DE072F7A000100000001 /* WorkspaceAIInbox.swift in Sources */,
 				C2271F571D9D46BC00424F7B /* ShortPeerRowItem.swift in Sources */,
 				C291942F1DCC6E2200359491 /* DeclareEncodables.swift in Sources */,
 				27E6DB0A2689C71E003D6164 /* MetalFunctions.metal in Sources */,

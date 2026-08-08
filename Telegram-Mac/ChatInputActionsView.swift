@@ -65,12 +65,57 @@ final class StarsSendActionView : Control {
 //
 let iconsInset:CGFloat = 20
 
-private enum CodexAssistantAction: String, Codable {
+private struct CodexTranslationLanguage {
+    let code: String
+    let title: String
+}
+
+private let codexTranslationLanguages: [CodexTranslationLanguage] = [
+    .init(code: "en", title: "English"),
+    .init(code: "ru", title: "Russian"),
+    .init(code: "es", title: "Spanish"),
+    .init(code: "de", title: "German"),
+    .init(code: "fr", title: "French"),
+    .init(code: "it", title: "Italian"),
+    .init(code: "pt", title: "Portuguese"),
+    .init(code: "zh", title: "Chinese"),
+    .init(code: "ja", title: "Japanese"),
+    .init(code: "ko", title: "Korean"),
+    .init(code: "tr", title: "Turkish"),
+    .init(code: "ar", title: "Arabic")
+]
+
+private let codexTranslationLanguageKey = "telegramwork.codex.translation.language"
+
+private var codexSelectedTranslationLanguage: CodexTranslationLanguage {
+    get {
+        let stored = UserDefaults.standard.string(forKey: codexTranslationLanguageKey)
+        if let stored, let match = codexTranslationLanguages.first(where: { $0.code == stored }) {
+            return match
+        }
+        /// Fall back to the system language when it is one we offer, otherwise English.
+        let system = Locale.current.languageCode ?? "en"
+        return codexTranslationLanguages.first(where: { $0.code == system }) ?? codexTranslationLanguages[0]
+    }
+    set {
+        UserDefaults.standard.set(newValue.code, forKey: codexTranslationLanguageKey)
+    }
+}
+
+enum CodexAssistantAction: String, Codable, CaseIterable {
     case summarize
     case draftReply
     case polishDraft
     case actionItems
+    case translate
+    case voiceToText
+    case generateImage
     case custom
+
+    /// Everything except the free-form composer, which is governed by its feature flag alone.
+    static var configurable: [CodexAssistantAction] {
+        return allCases.filter { $0 != .custom }
+    }
 
     var title: String {
         switch self {
@@ -82,48 +127,95 @@ private enum CodexAssistantAction: String, Codable {
             return "Polish draft"
         case .actionItems:
             return "Action items"
+        case .translate:
+            return "Translate"
+        case .voiceToText:
+            return "Voice to text"
+        case .generateImage:
+            return "Generate image"
         case .custom:
             return "Ask Codex"
         }
     }
 
-    var subtitle: String {
+    var settingsSubtitle: String {
         switch self {
         case .summarize:
-            return "Summarize selected history"
+            return "Summarize the selected history"
         case .draftReply:
-            return "Reply using selected history"
+            return "Write a reply from the selected history"
         case .polishDraft:
-            return "Improve your current draft"
+            return "Rewrite the draft in your composer"
         case .actionItems:
-            return "Tasks from selected history"
+            return "Extract tasks from the selected history"
+        case .translate:
+            return "Translate your draft, or the conversation"
+        case .voiceToText:
+            return "Transcribe voice messages in the selected range"
+        case .generateImage:
+            return "Create an image and attach it to your draft"
         case .custom:
             return ""
         }
     }
 
-    var symbol: String {
+    /// Per-action switches share the namespaced feature dictionary, so no schema migration.
+    var flagKey: String {
+        return "ai.action.\(rawValue)"
+    }
+
+    /// New, heavier actions stay off until asked for; the original four keep working as before.
+    var isEnabledByDefault: Bool {
         switch self {
-        case .summarize:
-            return "≡"
-        case .draftReply:
-            return "↩"
-        case .polishDraft:
-            return "✎"
-        case .actionItems:
-            return "✓"
-        case .custom:
-            return "✦"
+        case .voiceToText, .generateImage:
+            return false
+        default:
+            return true
         }
     }
 
+    /// U+FE0E forces text presentation — several of these glyphs otherwise render as colour emoji.
+    var symbol: String {
+        switch self {
+        case .summarize:
+            return "≡\u{FE0E}"
+        case .draftReply:
+            return "↩\u{FE0E}"
+        case .polishDraft:
+            return "✎\u{FE0E}"
+        case .actionItems:
+            return "✓\u{FE0E}"
+        case .translate:
+            return "⇄\u{FE0E}"
+        case .voiceToText:
+            return "♪\u{FE0E}"
+        case .generateImage:
+            return "▦\u{FE0E}"
+        case .custom:
+            return "✦\u{FE0E}"
+        }
+    }
+
+    /// A free-form question only reads the conversation — it writes nothing back until the
+    /// result is explicitly used, so it belongs with the summary capability, not reply drafting.
     var feature: WorkspaceAIFeature {
         switch self {
-        case .summarize, .actionItems:
+        case .summarize, .actionItems, .translate, .voiceToText, .custom:
             return .chatSummaries
-        case .draftReply, .polishDraft, .custom:
+        case .draftReply, .polishDraft, .generateImage:
             return .replyDrafts
         }
+    }
+
+    /// Actions that need a choice before they can run.
+    var opensMenu: Bool {
+        return self == .translate
+    }
+
+    /// Voice to text goes to a local server or Telegram's own transcription — it never touches
+    /// the ACP agent, so it must stay usable while no agent is connected.
+    var requiresAgent: Bool {
+        return self != .voiceToText
     }
 }
 
@@ -166,6 +258,123 @@ private final class CodexAssistantHistoryStore {
     }
 }
 
+/// Owns the running request so it outlives the popover. The panel is only a view onto this;
+/// closing it detaches an observer instead of cancelling work.
+private final class CodexAssistantSession {
+    enum Phase {
+        case idle
+        case running(action: CodexAssistantAction, text: String)
+        case result(action: CodexAssistantAction?, text: String)
+        case image(url: URL, caption: String)
+    }
+
+    let peerId: PeerId
+    private let coordinator: WorkspaceAIJobCoordinator
+    private let historyStore: CodexAssistantHistoryStore
+    private var jobId: UUID?
+    private var runningAction: CodexAssistantAction?
+
+    private(set) var phase: Phase = .idle
+    private(set) var entries: [CodexAssistantHistoryEntry]
+
+    var phaseChanged: ((Phase) -> Void)?
+    var historyChanged: (([CodexAssistantHistoryEntry]) -> Void)?
+
+    var isRunning: Bool {
+        return jobId != nil
+    }
+
+    init(accountId: Int64, profileId: String, peerId: PeerId, coordinator: WorkspaceAIJobCoordinator) {
+        self.peerId = peerId
+        self.coordinator = coordinator
+        self.historyStore = CodexAssistantHistoryStore(accountId: accountId, profileId: profileId, peerId: peerId)
+        self.entries = historyStore.entries
+    }
+
+    func present(_ phase: Phase) {
+        self.phase = phase
+        phaseChanged?(phase)
+    }
+
+    func cancelActiveJob() {
+        if let jobId {
+            coordinator.cancel(jobId)
+        }
+        jobId = nil
+        runningAction = nil
+    }
+
+    /// `transform` lets an action reinterpret a successful reply — image generation looks on
+    /// disk instead of showing the text. It runs on the session, so no view has to be alive.
+    func submit(
+        prompt: String,
+        action: CodexAssistantAction,
+        customPrompt: String?,
+        dateRange: ClosedRange<Date>,
+        streams: Bool,
+        transform: ((String) -> Phase?)? = nil
+    ) {
+        cancelActiveJob()
+        runningAction = action
+        present(.running(action: action, text: "Thinking…"))
+
+        jobId = coordinator.submit(prompt: prompt, onText: { [weak self] chunk in
+            guard let self, streams, self.runningAction == action else { return }
+            var accumulated = ""
+            if case let .running(_, text) = self.phase, text != "Thinking…" {
+                accumulated = text
+            }
+            self.present(.running(action: action, text: accumulated + chunk))
+        }, completion: { [weak self] result in
+            guard let self, self.runningAction == action else { return }
+            self.jobId = nil
+            self.runningAction = nil
+
+            switch result {
+            case let .success(text):
+                if let transform, let phase = transform(text) {
+                    self.present(phase)
+                } else {
+                    self.present(.result(action: action, text: text))
+                }
+                let entry = CodexAssistantHistoryEntry(
+                    id: UUID(),
+                    action: action,
+                    customPrompt: customPrompt,
+                    fromDate: dateRange.lowerBound,
+                    toDate: dateRange.upperBound,
+                    createdAt: Date(),
+                    response: String(text.prefix(50_000))
+                )
+                self.entries = self.historyStore.add(entry)
+                self.historyChanged?(self.entries)
+            case let .failure(error):
+                if let jobError = error as? WorkspaceAIJobError, case .cancelled = jobError {
+                    self.present(.idle)
+                    return
+                }
+                self.present(.result(action: nil, text: error.localizedDescription))
+            }
+        })
+    }
+}
+
+private final class CodexAssistantSessionRegistry {
+    static let shared = CodexAssistantSessionRegistry()
+
+    private var sessions: [String: CodexAssistantSession] = [:]
+
+    func session(accountId: Int64, profileId: String, peerId: PeerId, coordinator: WorkspaceAIJobCoordinator) -> CodexAssistantSession {
+        let key = "\(accountId).\(profileId).\(peerId.toInt64())"
+        if let existing = sessions[key] {
+            return existing
+        }
+        let session = CodexAssistantSession(accountId: accountId, profileId: profileId, peerId: peerId, coordinator: coordinator)
+        sessions[key] = session
+        return session
+    }
+}
+
 private func codexAssistantIcon(_ color: NSColor, size: NSSize = NSMakeSize(22, 22)) -> CGImage? {
     return generateImage(size, contextGenerator: { size, context in
         context.clear(size.bounds)
@@ -205,20 +414,36 @@ private func codexAssistantIcon(_ color: NSColor, size: NSSize = NSMakeSize(22, 
     })
 }
 
+/// Compact chip. The four full-width cards it replaced cost ~180pt of vertical space for
+/// information the titles already carried.
 private final class CodexAssistantActionControl: Control {
+    static let height: CGFloat = 30
+
+    private static let padding: CGFloat = 10
+    private static let symbolGap: CGFloat = 6
+
     let action: CodexAssistantAction
     private let symbolView = TextView()
     private let titleView = TextView()
-    private let subtitleView = TextView()
+    private(set) var intrinsicWidth: CGFloat = 0
+    private(set) var isActive = false
+    private var customTitle: String?
+
+    /// An active chip has captured the composer, so it reads as selected rather than tappable.
+    func setActive(_ active: Bool) {
+        guard isActive != active else { return }
+        isActive = active
+        updateTheme(title: customTitle)
+    }
 
     init(action: CodexAssistantAction) {
         self.action = action
         super.init(frame: .zero)
         self.scaleOnClick = true
-        self.layer?.cornerRadius = 10
-        self.layer?.borderWidth = 1
+        self.layer?.cornerRadius = Self.height / 2
+        self.layer?.borderWidth = .borderSize
 
-        for view in [symbolView, titleView, subtitleView] {
+        for view in [symbolView, titleView] {
             view.userInteractionEnabled = false
             view.isSelectable = false
             addSubview(view)
@@ -226,28 +451,27 @@ private final class CodexAssistantActionControl: Control {
         updateTheme()
     }
 
-    func updateTheme() {
-        self.backgroundColor = theme.colors.grayBackground
-        self.layer?.borderColor = theme.colors.border.cgColor
+    func updateTheme(title: String? = nil) {
+        customTitle = title
+        self.backgroundColor = isActive ? theme.colors.accent.withAlphaComponent(0.15) : theme.colors.grayBackground
+        self.layer?.borderColor = (isActive ? theme.colors.accent : theme.colors.border).cgColor
 
-        let symbol = TextViewLayout(.initialize(string: action.symbol, color: theme.colors.accent, font: .medium(18)))
-        symbol.measure(width: 24)
+        let symbol = TextViewLayout(.initialize(string: action.symbol, color: theme.colors.accent, font: .medium(13)))
+        symbol.measure(width: 20)
         symbolView.update(symbol)
 
-        let title = TextViewLayout(.initialize(string: action.title, color: theme.colors.text, font: .medium(13)))
-        title.measure(width: 130)
-        titleView.update(title)
+        let text = TextViewLayout(.initialize(string: title ?? action.title, color: isActive ? theme.colors.accent : theme.colors.text, font: .medium(12)), maximumNumberOfLines: 1, truncationType: .end)
+        text.measure(width: 180)
+        titleView.update(text)
 
-        let subtitle = TextViewLayout(.initialize(string: action.subtitle, color: theme.colors.grayText, font: .normal(11)))
-        subtitle.measure(width: 130)
-        subtitleView.update(subtitle)
+        intrinsicWidth = Self.padding * 2 + symbolView.frame.width + Self.symbolGap + titleView.frame.width
+        needsLayout = true
     }
 
     override func layout() {
         super.layout()
-        symbolView.setFrameOrigin(NSMakePoint(12, 12))
-        titleView.setFrameOrigin(NSMakePoint(42, 10))
-        subtitleView.setFrameOrigin(NSMakePoint(42, 34))
+        symbolView.setFrameOrigin(NSMakePoint(Self.padding, floor((frame.height - symbolView.frame.height) / 2)))
+        titleView.setFrameOrigin(NSMakePoint(symbolView.frame.maxX + Self.symbolGap, floor((frame.height - titleView.frame.height) / 2)))
     }
 
     required init?(coder: NSCoder) {
@@ -259,24 +483,87 @@ private final class CodexAssistantActionControl: Control {
     }
 }
 
+/// "Today" collapses the range row to a single control; the date pickers only appear when it is off.
+private final class CodexTodayToggle: Control {
+    static let height: CGFloat = 24
+
+    private let symbolView = TextView()
+    private let titleView = TextView()
+    private(set) var isOn = true
+    private(set) var intrinsicWidth: CGFloat = 0
+
+    required init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        self.scaleOnClick = true
+        self.layer?.cornerRadius = Self.height / 2
+        self.layer?.borderWidth = .borderSize
+        for view in [symbolView, titleView] {
+            view.userInteractionEnabled = false
+            view.isSelectable = false
+            addSubview(view)
+        }
+        updateTheme()
+    }
+
+    func setOn(_ value: Bool) {
+        guard isOn != value else { return }
+        isOn = value
+        updateTheme()
+    }
+
+    func updateTheme() {
+        self.backgroundColor = isOn ? theme.colors.accent.withAlphaComponent(0.15) : theme.colors.grayBackground
+        self.layer?.borderColor = (isOn ? theme.colors.accent : theme.colors.border).cgColor
+
+        let symbol = TextViewLayout(.initialize(string: isOn ? "☑\u{FE0E}" : "☐\u{FE0E}", color: isOn ? theme.colors.accent : theme.colors.grayText, font: .medium(12)))
+        symbol.measure(width: 20)
+        symbolView.update(symbol)
+
+        let title = TextViewLayout(.initialize(string: "Today", color: isOn ? theme.colors.accent : theme.colors.text, font: .medium(12)), maximumNumberOfLines: 1)
+        title.measure(width: 90)
+        titleView.update(title)
+
+        intrinsicWidth = 20 + symbolView.frame.width + 6 + titleView.frame.width
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        symbolView.setFrameOrigin(NSMakePoint(10, floor((frame.height - symbolView.frame.height) / 2)))
+        titleView.setFrameOrigin(NSMakePoint(symbolView.frame.maxX + 6, floor((frame.height - titleView.frame.height) / 2)))
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+}
+
 private final class CodexAssistantView: View, NSTextViewDelegate {
     private let logo = ImageView()
     private let titleView = TextView()
     private let statusView = TextView()
     private let connectButton = TextButton()
     private let separator = View()
-    private let sectionTitle = TextView()
     private let historyButton = TextButton()
-    private let suggestionsTitle = TextView()
     private let rangeTitle = TextView()
     private let fromTitle = TextView()
     private let toTitle = TextView()
+    private let emptyHint = TextView()
     private let fromDatePicker = NSDatePicker()
     private let toDatePicker = NSDatePicker()
+    private let todayToggle = CodexTodayToggle(frame: .zero)
+    private var rangePreset: WorkspaceChatRangePreset = .sevenDays
     private let summary = CodexAssistantActionControl(action: .summarize)
     private let reply = CodexAssistantActionControl(action: .draftReply)
     private let polish = CodexAssistantActionControl(action: .polishDraft)
     private let tasks = CodexAssistantActionControl(action: .actionItems)
+    private let translate = CodexAssistantActionControl(action: .translate)
+    private let voice = CodexAssistantActionControl(action: .voiceToText)
+    private let imagegen = CodexAssistantActionControl(action: .generateImage)
+    private lazy var actionControls: [CodexAssistantActionControl] = [summary, reply, polish, tasks, translate, voice, imagegen]
+    private var visibleActionControls: [CodexAssistantActionControl] {
+        return actionControls.filter { !$0.isHidden }
+    }
     private let promptContainer = View()
     private let promptScroll = NSScrollView()
     private let promptText = NSTextView()
@@ -285,28 +572,51 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
     private let responseContainer = View()
     private let responseScroll = NSScrollView()
     private let responseText = NSTextView()
+    private let resultImage = ImageView()
+    private var generatedImageURL: URL?
     private let progress = ProgressIndicator(frame: NSMakeRect(0, 0, 22, 22))
     private let useButton = TextButton()
     private let copyButton = TextButton()
     private let newRequestButton = TextButton()
     private var currentAction: CodexAssistantAction?
+    /// What the composer and its button currently do — free-form question, or image description.
+    private var composerMode: CodexAssistantAction = .custom
+    /// Provider name for every user-visible label; the panel is not Codex-specific.
+    private var agentTitle = "Codex"
     private var canAsk = false
+    private var canGenerateImages = false
+    private var isConnected = false
+    private var placeholderWidth: CGFloat = 0
     private var historyEntries: [CodexAssistantHistoryEntry] = []
-    private var insightSuggestions: [WorkspaceAISuggestion] = []
-    private var suggestionButtons: [TextButton] = []
 
     var actionSelected: ((CodexAssistantAction, String?) -> Void)?
     var connectSelected: (() -> Void)?
     var useResult: ((String, CodexAssistantAction?) -> Void)?
+    var useImageResult: ((URL) -> Void)?
+    var newRequestSelected: (() -> Void)?
     var historySelected: ((CodexAssistantHistoryEntry) -> Void)?
-    var insightSuggestionSelected: ((WorkspaceAISuggestion) -> Void)?
 
     var selectedDateRange: ClosedRange<Date> {
         let calendar = Calendar.current
-        let start = calendar.startOfDay(for: fromDatePicker.dateValue)
-        let endStart = calendar.startOfDay(for: toDatePicker.dateValue)
+        let start: Date
+        let endStart: Date
+        if todayToggle.isOn {
+            start = calendar.startOfDay(for: Date())
+            endStart = start
+        } else {
+            start = calendar.startOfDay(for: fromDatePicker.dateValue)
+            endStart = calendar.startOfDay(for: toDatePicker.dateValue)
+        }
         let end = calendar.date(byAdding: .day, value: 1, to: endStart)?.addingTimeInterval(-1) ?? endStart
         return start...end
+    }
+
+    /// Seeds the pickers from the profile's configured range whenever Today is cleared.
+    private func applyRangePreset() {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        fromDatePicker.dateValue = calendar.date(byAdding: .day, value: -rangePreset.dayOffset, to: today) ?? today
+        toDatePicker.dateValue = today
     }
 
     required init(frame frameRect: NSRect) {
@@ -317,27 +627,33 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         addSubview(statusView)
         addSubview(connectButton)
         addSubview(separator)
-        addSubview(sectionTitle)
         addSubview(historyButton)
-        addSubview(suggestionsTitle)
         addSubview(rangeTitle)
         addSubview(fromTitle)
         addSubview(toTitle)
         addSubview(fromDatePicker)
         addSubview(toDatePicker)
-        addSubview(summary)
-        addSubview(reply)
-        addSubview(polish)
-        addSubview(tasks)
+        addSubview(todayToggle)
+        for control in actionControls {
+            addSubview(control)
+        }
+        addSubview(emptyHint)
         addSubview(promptContainer)
         addSubview(responseContainer)
+
+        emptyHint.userInteractionEnabled = false
+        emptyHint.isSelectable = false
 
         promptContainer.addSubview(promptScroll)
         promptContainer.addSubview(promptPlaceholder)
         promptContainer.addSubview(askButton)
 
         responseContainer.addSubview(responseScroll)
+        responseContainer.addSubview(resultImage)
         responseContainer.addSubview(progress)
+        resultImage.isHidden = true
+        resultImage.animates = false
+        resultImage.contentGravity = .resizeAspect
         responseContainer.addSubview(useButton)
         responseContainer.addSubview(copyButton)
         responseContainer.addSubview(newRequestButton)
@@ -388,7 +704,7 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
             guard let self else { return }
             let prompt = self.promptText.string.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !prompt.isEmpty else { return }
-            self.actionSelected?(.custom, prompt)
+            self.actionSelected?(self.composerMode, prompt)
         }, for: .Click)
 
         connectButton.scaleOnClick = true
@@ -399,6 +715,10 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         useButton.scaleOnClick = true
         useButton.set(handler: { [weak self] _ in
             guard let self else { return }
+            if let url = self.generatedImageURL {
+                self.useImageResult?(url)
+                return
+            }
             let result = self.responseText.string.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !result.isEmpty else { return }
             self.useResult?(result, self.currentAction)
@@ -414,6 +734,7 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         newRequestButton.scaleOnClick = true
         newRequestButton.set(handler: { [weak self] _ in
             self?.showComposer(clear: true, focus: true)
+            self?.newRequestSelected?()
         }, for: .Click)
 
         historyButton.scaleOnClick = true
@@ -421,10 +742,26 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
             self?.showHistoryMenu()
         }, for: .Click)
 
-        for control in [summary, reply, polish, tasks] {
+        todayToggle.set(handler: { [weak self] _ in
+            guard let self else { return }
+            self.todayToggle.setOn(!self.todayToggle.isOn)
+            if !self.todayToggle.isOn {
+                self.applyRangePreset()
+            }
+            self.needsLayout = true
+        }, for: .Click)
+
+        for control in actionControls {
             control.set(handler: { [weak self, weak control] _ in
-                guard let control else { return }
-                self?.actionSelected?(control.action, nil)
+                guard let self, let control else { return }
+                if control.action.opensMenu {
+                    self.showTranslationMenu(from: control)
+                } else if control.action == .generateImage {
+                    /// Hands the composer over to image prompts instead of firing straight away.
+                    self.setComposerMode(self.composerMode == .generateImage ? .custom : .generateImage)
+                } else {
+                    self.actionSelected?(control.action, nil)
+                }
             }, for: .Click)
         }
 
@@ -447,21 +784,17 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         logo.image = codexAssistantIcon(theme.colors.accent, size: NSMakeSize(26, 26))
         logo.setFrameSize(NSMakeSize(26, 26))
 
-        let title = TextViewLayout(.initialize(string: "Codex", color: theme.colors.text, font: .medium(16)))
+        let title = TextViewLayout(.initialize(string: agentTitle, color: theme.colors.text, font: .medium(16)))
         title.measure(width: 160)
         titleView.update(title)
-
-        let section = TextViewLayout(.initialize(string: "WORK WITH THIS CHAT", color: theme.colors.grayText, font: .medium(10)))
-        section.measure(width: 200)
-        sectionTitle.update(section)
 
         let range = TextViewLayout(.initialize(string: "CONVERSATION RANGE", color: theme.colors.grayText, font: .medium(10)))
         range.measure(width: 200)
         rangeTitle.update(range)
 
-        let suggestions = TextViewLayout(.initialize(string: "SUGGESTED NEXT STEPS", color: theme.colors.grayText, font: .medium(10)))
-        suggestions.measure(width: 220)
-        suggestionsTitle.update(suggestions)
+        let hint = TextViewLayout(.initialize(string: "Ask anything about this conversation, or pick an action below.", color: theme.colors.grayText, font: .normal(12)), alignment: .center)
+        hint.measure(width: 260)
+        emptyHint.update(hint)
 
         let from = TextViewLayout(.initialize(string: "From", color: theme.colors.grayText, font: .normal(11)))
         from.measure(width: 40)
@@ -471,26 +804,35 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         to.measure(width: 28)
         toTitle.update(to)
 
+        /// The stock bezel looks foreign against the dark panel, so match the surrounding fills.
+        for picker in [fromDatePicker, toDatePicker] {
+            picker.isBezeled = false
+            picker.isBordered = false
+            picker.drawsBackground = true
+            picker.backgroundColor = theme.colors.grayBackground
+            picker.textColor = theme.colors.text
+        }
+
         historyButton.set(font: .medium(11), for: .Normal)
         historyButton.set(color: theme.colors.accent, for: .Normal)
         historyButton.set(background: .clear, for: .Normal)
         updateHistoryButton()
+        todayToggle.updateTheme()
 
-        for control in [summary, reply, polish, tasks] {
-            control.updateTheme()
+        for control in actionControls {
+            /// Translate carries the target language so the choice is visible without opening the menu.
+            control.updateTheme(title: control.action == .translate ? "Translate · \(codexSelectedTranslationLanguage.title)" : nil)
         }
 
         promptText.textColor = theme.colors.text
         promptText.font = .normal(14)
-        let placeholder = TextViewLayout(.initialize(string: "Ask Codex about this chat…", color: theme.colors.grayText, font: .normal(14)))
-        placeholder.measure(width: 300)
-        promptPlaceholder.update(placeholder)
+        updatePlaceholder()
 
-        askButton.set(text: "Ask", for: .Normal)
         askButton.set(font: .medium(12), for: .Normal)
         askButton.set(color: theme.colors.underSelectedColor, for: .Normal)
         askButton.set(background: theme.colors.accent, for: .Normal)
         askButton.layer?.cornerRadius = 8
+        updateAskButton()
 
         useButton.set(font: .medium(12), for: .Normal)
         useButton.set(color: theme.colors.underSelectedColor, for: .Normal)
@@ -511,40 +853,6 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         responseText.textColor = theme.colors.text
         responseText.font = .normal(12)
         progress.progressColor = theme.colors.accent
-        for button in suggestionButtons {
-            styleSuggestionButton(button)
-        }
-    }
-
-    func updateInsightSuggestions(_ suggestions: [WorkspaceAISuggestion]) {
-        insightSuggestions = Array(suggestions.prefix(3))
-        for button in suggestionButtons {
-            button.removeFromSuperview()
-        }
-        suggestionButtons = insightSuggestions.map { [weak self] suggestion in
-            let button = TextButton()
-            button.scaleOnClick = true
-            button.set(text: suggestion.title, for: .Normal)
-            self?.styleSuggestionButton(button)
-            button.set(handler: { [weak self] _ in
-                self?.insightSuggestionSelected?(suggestion)
-            }, for: .Click)
-            self?.addSubview(button)
-            return button
-        }
-        suggestionsTitle.isHidden = suggestionButtons.isEmpty
-        needsLayout = true
-    }
-
-    private func styleSuggestionButton(_ button: TextButton) {
-        button.set(font: .medium(11), for: .Normal)
-        button.set(color: theme.colors.accent, for: .Normal)
-        button.set(background: theme.colors.grayBackground, for: .Normal)
-        button.layer?.cornerRadius = 8
-        button.layer?.borderWidth = 1
-        button.layer?.borderColor = theme.colors.border.cgColor
-        button.sizeToFit(NSMakeSize(16, 10))
-        button.setFrameSize(NSMakeSize(min(button.frame.width, 150), 30))
     }
 
     func updateHistory(_ entries: [CodexAssistantHistoryEntry]) {
@@ -554,6 +862,8 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
     }
 
     func showHistoryEntry(_ entry: CodexAssistantHistoryEntry) {
+        /// A past entry carries its own dates, so the explicit range has to be visible again.
+        todayToggle.setOn(false)
         fromDatePicker.dateValue = entry.fromDate
         toDatePicker.dateValue = entry.toDate
         setResult(entry.response, action: entry.action, loading: false)
@@ -565,6 +875,22 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         historyButton.sizeToFit(NSMakeSize(12, 8))
         historyButton.isEnabled = !historyEntries.isEmpty
         historyButton.layer?.opacity = historyEntries.isEmpty ? 0.45 : 1.0
+    }
+
+    private func showTranslationMenu(from control: CodexAssistantActionControl) {
+        guard control.isEnabled else { return }
+        let menu = NSMenu()
+        let selected = codexSelectedTranslationLanguage
+        for language in codexTranslationLanguages {
+            let item = ContextMenuItem(language.title, handler: { [weak self] in
+                codexSelectedTranslationLanguage = language
+                self?.updateTheme()
+                self?.actionSelected?(.translate, language.title)
+            })
+            item.state = language.code == selected.code ? .on : .off
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSMakePoint(0, control.frame.height + 4), in: control)
     }
 
     private func showHistoryMenu() {
@@ -594,7 +920,17 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         }
     }
 
-    func update(status: WorkspaceACPStatus, enabledFeatures: Set<WorkspaceAIFeature>) {
+    func update(status: WorkspaceACPStatus, enabledActions: Set<CodexAssistantAction>, rangePreset: WorkspaceChatRangePreset, agentTitle: String) {
+        if self.agentTitle != agentTitle {
+            self.agentTitle = agentTitle
+            updateTheme()
+        }
+        if self.rangePreset != rangePreset {
+            self.rangePreset = rangePreset
+            if !todayToggle.isOn {
+                applyRangePreset()
+            }
+        }
         var text: String
         var color: NSColor
         var buttonTitle: String
@@ -628,10 +964,14 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
             connected = false
         }
 
-        if enabledFeatures.isEmpty {
-            text = "●  AI features are off"
+        if enabledActions.isEmpty {
+            text = "●  All chat actions are off"
             color = theme.colors.grayText
             buttonTitle = "Settings"
+        } else if !connected, enabledActions.allSatisfy({ !$0.requiresAgent }) {
+            /// Nothing on this panel needs the agent, so "not connected" is not a problem.
+            text = "●  Ready · on-device only"
+            color = theme.colors.greenUI
         }
 
         let statusLayout = TextViewLayout(.initialize(string: text, color: color, font: .normal(11)))
@@ -644,31 +984,114 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         connectButton.set(background: .clear, for: .Normal)
         connectButton.sizeToFit(NSMakeSize(12, 8))
 
-        summary.isEnabled = connected && enabledFeatures.contains(.chatSummaries)
-        tasks.isEnabled = connected && enabledFeatures.contains(.chatSummaries)
-        reply.isEnabled = connected && enabledFeatures.contains(.replyDrafts)
-        polish.isEnabled = connected && enabledFeatures.contains(.replyDrafts)
-        canAsk = connected && enabledFeatures.contains(.replyDrafts)
-        promptText.isEditable = canAsk
+        canAsk = connected
+        canGenerateImages = connected && enabledActions.contains(.generateImage)
+        promptText.isEditable = canAsk || canGenerateImages
 
-        for control in [summary, reply, polish, tasks] {
+        for control in actionControls {
+            /// Switched off in Settings means gone, not greyed out — the point is fewer buttons.
+            let available = enabledActions.contains(control.action)
+            control.isHidden = !available
+            control.isEnabled = available && (connected || !control.action.requiresAgent)
             control.layer?.opacity = control.isEnabled ? 1.0 : 0.45
         }
+        isConnected = connected
+
+        /// Losing the image action mid-session must not strand the composer in image mode.
+        if composerMode == .generateImage, !canGenerateImages {
+            setComposerMode(.custom)
+            return
+        }
+        updatePlaceholder()
+        updateAskButton()
         updatePromptState()
+        needsLayout = true
+    }
+
+    private func setComposerMode(_ mode: CodexAssistantAction) {
+        composerMode = mode
+        imagegen.setActive(mode == .generateImage)
+        updatePlaceholder()
+        updateAskButton()
+        updatePromptState()
+        window?.makeFirstResponder(promptText)
+        needsLayout = true
+    }
+
+    private func updateAskButton() {
+        askButton.set(text: composerMode == .generateImage ? "Generate" : "Ask", for: .Normal)
+        askButton.sizeToFit(NSMakeSize(20, 10))
+        askButton.setFrameSize(NSMakeSize(max(56, askButton.frame.width), 32))
+    }
+
+    /// Explains why the composer is inert instead of silently swallowing clicks.
+    private func updatePlaceholder() {
+        let text: String
+        if composerMode == .generateImage {
+            text = "Describe the image you want \(agentTitle) to draw…"
+        } else if canAsk {
+            text = "Ask \(agentTitle) about this chat…"
+        } else if !isConnected {
+            text = "Connect an agent to ask about this chat."
+        } else {
+            text = "Enable \(CodexAssistantAction.custom.feature.title) for this profile to ask about this chat."
+        }
+        placeholderWidth = max(120, frame.width - 60)
+        let placeholder = TextViewLayout(.initialize(string: text, color: theme.colors.grayText, font: .normal(14)), maximumNumberOfLines: 2, truncationType: .end)
+        placeholder.measure(width: placeholderWidth)
+        promptPlaceholder.update(placeholder)
+    }
+
+    func focusComposer() {
+        guard canAsk || canGenerateImages else { return }
+        window?.makeFirstResponder(promptText)
+    }
+
+    /// Non-nil only while the composer already holds focus, so the window keeps it there
+    /// instead of handing the keystroke to the chat input. Never steals focus on its own.
+    var composerResponder: NSResponder? {
+        guard canAsk || canGenerateImages, let current = window?.firstResponder else {
+            return nil
+        }
+        if current === promptText || (current as? NSView)?.isDescendant(of: promptContainer) == true {
+            return promptText
+        }
+        return nil
+    }
+
+    /// Shows a generated image in place of the response text, ready to attach to the chat.
+    func setImageResult(_ url: URL, caption: String) {
+        generatedImageURL = url
+        currentAction = .generateImage
+        resultImage.image = NSImage(contentsOf: url)?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        resultImage.isHidden = false
+        responseText.string = caption
+        responseScroll.isHidden = true
+        responseContainer.isHidden = false
+        emptyHint.isHidden = true
+        progress.isHidden = true
+        newRequestButton.isHidden = false
+        useButton.isHidden = false
+        copyButton.isHidden = true
+        useButton.set(text: "Add to message", for: .Normal)
+        useButton.sizeToFit(NSMakeSize(16, 10))
         needsLayout = true
     }
 
     func setResult(_ text: String, action: CodexAssistantAction?, loading: Bool) {
         currentAction = action
+        generatedImageURL = nil
+        resultImage.isHidden = true
+        resultImage.image = nil
         responseText.string = text
-        promptContainer.isHidden = true
         responseContainer.isHidden = false
+        emptyHint.isHidden = true
         progress.isHidden = !loading
         responseScroll.isHidden = loading
         newRequestButton.isHidden = loading
         useButton.isHidden = loading || action == nil || text.isEmpty
         copyButton.isHidden = loading || action == nil || text.isEmpty
-        useButton.set(text: action == .draftReply || action == .polishDraft ? "Use draft" : "Add to draft", for: .Normal)
+        useButton.set(text: action == .draftReply || action == .polishDraft || action == .translate ? "Use draft" : "Add to draft", for: .Normal)
         useButton.sizeToFit(NSMakeSize(16, 10))
         copyButton.sizeToFit(NSMakeSize(10, 10))
         needsLayout = true
@@ -680,11 +1103,16 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         }
         currentAction = action
         responseText.string += text
-        promptContainer.isHidden = true
         responseContainer.isHidden = false
+        emptyHint.isHidden = true
         progress.isHidden = true
         responseScroll.isHidden = false
         responseScroll.contentView.scroll(to: NSMakePoint(0, responseText.bounds.height))
+    }
+
+    /// Returns to the empty composer without touching the text the user already typed.
+    func showComposerState() {
+        showComposer(clear: false, focus: false)
     }
 
     private func showComposer(clear: Bool, focus: Bool) {
@@ -695,6 +1123,7 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
         responseText.string = ""
         promptContainer.isHidden = false
         responseContainer.isHidden = true
+        emptyHint.isHidden = false
         updatePromptState()
         needsLayout = true
         if focus {
@@ -705,7 +1134,7 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
     private func updatePromptState() {
         let isEmpty = promptText.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         promptPlaceholder.isHidden = !isEmpty
-        askButton.isEnabled = canAsk && !isEmpty
+        askButton.isEnabled = (composerMode == .generateImage ? canGenerateImages : canAsk) && !isEmpty
         askButton.layer?.opacity = askButton.isEnabled ? 1.0 : 0.45
     }
 
@@ -715,51 +1144,96 @@ private final class CodexAssistantView: View, NSTextViewDelegate {
 
     override func layout() {
         super.layout()
+
         let inset: CGFloat = 16
+        let headerHeight: CGFloat = 62
+        let contentWidth = frame.width - inset * 2
+
         logo.setFrameOrigin(NSMakePoint(inset, 14))
-        titleView.setFrameOrigin(NSMakePoint(50, 12))
-        statusView.setFrameOrigin(NSMakePoint(50, 35))
-        connectButton.setFrameOrigin(NSMakePoint(frame.width - connectButton.frame.width - inset, floor((62 - connectButton.frame.height) / 2)))
-        separator.frame = NSMakeRect(0, 62, frame.width, 1)
-        sectionTitle.setFrameOrigin(NSMakePoint(inset, 76))
-        historyButton.setFrameOrigin(NSMakePoint(frame.width - historyButton.frame.width - inset, 70))
+        titleView.setFrameOrigin(NSMakePoint(inset + 34, 12))
+        statusView.setFrameOrigin(NSMakePoint(inset + 34, 35))
+        connectButton.setFrameOrigin(NSMakePoint(frame.width - connectButton.frame.width - inset, floor((headerHeight - connectButton.frame.height) / 2)))
+        separator.frame = NSMakeRect(0, headerHeight, frame.width, .borderSize)
 
-        rangeTitle.setFrameOrigin(NSMakePoint(inset, 102))
-        fromTitle.setFrameOrigin(NSMakePoint(inset, 130))
-        fromDatePicker.frame = NSMakeRect(52, 120, 132, 24)
-        toTitle.setFrameOrigin(NSMakePoint(202, 130))
-        toDatePicker.frame = NSMakeRect(224, 120, frame.width - 224 - inset, 24)
+        var y = headerHeight + 16
 
-        let gap: CGFloat = 8
-        let cardWidth = floor((frame.width - inset * 2 - gap) / 2)
-        summary.frame = NSMakeRect(inset, 156, cardWidth, 62)
-        reply.frame = NSMakeRect(summary.frame.maxX + gap, 156, cardWidth, 62)
-        polish.frame = NSMakeRect(inset, 226, cardWidth, 62)
-        tasks.frame = NSMakeRect(polish.frame.maxX + gap, 226, cardWidth, 62)
+        /// Range header shares its row with the history control.
+        rangeTitle.setFrameOrigin(NSMakePoint(inset, y))
+        historyButton.setFrameOrigin(NSMakePoint(frame.width - historyButton.frame.width - inset, y - 5))
+        y += rangeTitle.frame.height + 8
 
-        var lowerY: CGFloat = 304
-        if !suggestionButtons.isEmpty {
-            suggestionsTitle.setFrameOrigin(NSMakePoint(inset, 300))
-            var x = inset
-            for button in suggestionButtons {
-                let available = max(70, frame.width - inset - x)
-                button.isHidden = x >= frame.width - inset
-                guard !button.isHidden else { continue }
-                button.setFrameSize(NSMakeSize(min(button.frame.width, available), 30))
-                button.setFrameOrigin(NSMakePoint(x, 316))
-                x = button.frame.maxX + 6
-            }
-            lowerY = 352
+        /// Today collapses the row; the pickers only take space when an explicit range is wanted.
+        let pickerHeight: CGFloat = 24
+        todayToggle.frame = NSMakeRect(inset, y, todayToggle.intrinsicWidth, CodexTodayToggle.height)
+        y += CodexTodayToggle.height
+
+        let showsPickers = !todayToggle.isOn
+        for view in [fromTitle, toTitle, fromDatePicker, toDatePicker] as [NSView] {
+            view.isHidden = !showsPickers
         }
-        let lowerFrame = NSMakeRect(inset, lowerY, frame.width - inset * 2, frame.height - lowerY - 16)
-        promptContainer.frame = lowerFrame
-        promptScroll.frame = NSMakeRect(6, 6, promptContainer.frame.width - 12, promptContainer.frame.height - 54)
-        promptPlaceholder.setFrameOrigin(NSMakePoint(16, 16))
-        askButton.frame = NSMakeRect(promptContainer.frame.width - 66, promptContainer.frame.height - 44, 56, 34)
 
-        responseContainer.frame = lowerFrame
+        if showsPickers {
+            y += 10
+            let labelGap: CGFloat = 6
+            let columnGap: CGFloat = 14
+            let pickerWidth = floor((contentWidth - fromTitle.frame.width - toTitle.frame.width - labelGap * 2 - columnGap) / 2)
+            let labelY = y + floor((pickerHeight - fromTitle.frame.height) / 2)
+
+            fromTitle.setFrameOrigin(NSMakePoint(inset, labelY))
+            fromDatePicker.frame = NSMakeRect(fromTitle.frame.maxX + labelGap, y, pickerWidth, pickerHeight)
+            toTitle.setFrameOrigin(NSMakePoint(fromDatePicker.frame.maxX + columnGap, labelY))
+            toDatePicker.frame = NSMakeRect(toTitle.frame.maxX + labelGap, y, pickerWidth, pickerHeight)
+            y += pickerHeight
+        }
+        y += 16
+
+        /// Composer and action chips form one block at the bottom: type a question and hit Ask,
+        /// or tap an action that runs against the same range. Results fill everything above.
+        let chipHeight = CodexAssistantActionControl.height
+        let chipGap: CGFloat = 6
+        let visibleChips = visibleActionControls
+        var chipRows = visibleChips.isEmpty ? 0 : 1
+        var probe = inset
+        for control in visibleChips {
+            let width = min(control.intrinsicWidth, contentWidth)
+            if probe > inset, probe + width > frame.width - inset {
+                probe = inset
+                chipRows += 1
+            }
+            probe += width + chipGap
+        }
+        let chipBlockHeight = chipRows == 0 ? 0 : CGFloat(chipRows) * chipHeight + CGFloat(chipRows - 1) * chipGap + 10
+
+        let composerHeight: CGFloat = 132
+        if placeholderWidth != max(120, frame.width - 60) {
+            updatePlaceholder()
+        }
+        let composerTop = frame.height - inset - chipBlockHeight - composerHeight
+        promptContainer.frame = NSMakeRect(inset, composerTop, contentWidth, composerHeight)
+        promptScroll.frame = NSMakeRect(6, 6, promptContainer.frame.width - 12, promptContainer.frame.height - 50)
+        promptPlaceholder.setFrameOrigin(NSMakePoint(14, 14))
+        let askWidth = max(56, askButton.frame.width)
+        askButton.frame = NSMakeRect(promptContainer.frame.width - askWidth - 10, promptContainer.frame.height - 42, askWidth, 32)
+
+        var chipX = inset
+        var chipY = promptContainer.frame.maxY + 10
+        for control in visibleActionControls {
+            let width = min(control.intrinsicWidth, contentWidth)
+            if chipX > inset, chipX + width > frame.width - inset {
+                chipX = inset
+                chipY += chipHeight + chipGap
+            }
+            control.frame = NSMakeRect(chipX, chipY, width, chipHeight)
+            chipX = control.frame.maxX + chipGap
+        }
+
+        let resultHeight = max(80, promptContainer.frame.minY - 12 - y)
+        responseContainer.frame = NSMakeRect(inset, y, contentWidth, resultHeight)
+        emptyHint.setFrameOrigin(NSMakePoint(inset + floor((contentWidth - emptyHint.frame.width) / 2), y + floor((resultHeight - emptyHint.frame.height) / 2)))
+
         let actionsHeight: CGFloat = newRequestButton.isHidden ? 0 : 38
         responseScroll.frame = NSMakeRect(4, 4, responseContainer.frame.width - 8, responseContainer.frame.height - 8 - actionsHeight)
+        resultImage.frame = NSMakeRect(8, 8, responseContainer.frame.width - 16, responseContainer.frame.height - 16 - actionsHeight)
         progress.center()
         if !newRequestButton.isHidden {
             newRequestButton.setFrameOrigin(NSMakePoint(10, responseContainer.frame.height - newRequestButton.frame.height - 8))
@@ -780,30 +1254,45 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
     private let store: WorkspaceProfileStore
     private let client: WorkspaceACPClient
     private let coordinator: WorkspaceAIJobCoordinator
-    private let historyStore: CodexAssistantHistoryStore
+    private let session: CodexAssistantSession
     private let statusDisposable = MetaDisposable()
     private let historyDisposable = MetaDisposable()
-    private let insightDisposable = MetaDisposable()
+    /// Guards the prompt-assembly stage only; once submitted the session owns the request.
     private var activeAction: CodexAssistantAction?
-    private var activeJobId: UUID?
-    private var response = ""
     private var currentStatus: WorkspaceACPStatus = .disconnected
 
     init(chatInteraction: ChatInteraction) {
-        let store = WorkspaceProfileStore.shared(accountId: chatInteraction.context.account.id.int64)
-        let client = WorkspaceACPRegistry.shared.client(accountId: chatInteraction.context.account.id.int64)
+        let accountId = chatInteraction.context.account.id.int64
+        let store = WorkspaceProfileStore.shared(accountId: accountId)
+        let client = WorkspaceACPRegistry.shared.client(accountId: accountId)
+        let coordinator = WorkspaceAIJobCoordinatorRegistry.shared.coordinator(accountId: accountId, client: client)
         self.chatInteraction = chatInteraction
         self.store = store
         self.client = client
-        self.coordinator = WorkspaceAIJobCoordinatorRegistry.shared.coordinator(accountId: chatInteraction.context.account.id.int64, client: client)
-        self.historyStore = CodexAssistantHistoryStore(
-            accountId: chatInteraction.context.account.id.int64,
+        self.coordinator = coordinator
+        self.session = CodexAssistantSessionRegistry.shared.session(
+            accountId: accountId,
             profileId: store.current.activeProfile.id,
-            peerId: chatInteraction.peerId
+            peerId: chatInteraction.peerId,
+            coordinator: coordinator
         )
         super.init(chatInteraction.context)
         bar = .init(height: 0)
-        _frameRect = NSMakeRect(0, 0, 420, 620)
+        _frameRect = NSMakeRect(0, 0, 420, 600)
+    }
+
+    /// Renders whatever the session is doing, so reopening the panel resumes mid-request.
+    private func render(_ phase: CodexAssistantSession.Phase) {
+        switch phase {
+        case .idle:
+            genericView.showComposerState()
+        case let .running(action, text):
+            genericView.setResult(text, action: action, loading: text == "Thinking…")
+        case let .result(action, text):
+            genericView.setResult(text, action: action, loading: false)
+        case let .image(url, caption):
+            genericView.setImageResult(url, caption: caption)
+        }
     }
 
     override func viewDidLoad() {
@@ -815,23 +1304,23 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
         genericView.historySelected = { [weak self] entry in
             self?.genericView.showHistoryEntry(entry)
         }
-        genericView.insightSuggestionSelected = { [weak self] suggestion in
-            guard let self else { return }
-            if let text = suggestion.proposedText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
-                self.chatInteraction.updateInput(with: text)
-                self.chatInteraction.focusInputField()
-                self.closePopover()
-            } else {
-                self.run(action: .custom, customPrompt: suggestion.detail)
-            }
-        }
         genericView.connectSelected = { [weak self] in
             self?.connectOrOpenSettings()
+        }
+        genericView.newRequestSelected = { [weak self] in
+            /// Clearing the panel must clear the session too, or reopening resurrects the result.
+            self?.session.cancelActiveJob()
+            self?.session.present(.idle)
+        }
+        genericView.useImageResult = { [weak self] url in
+            guard let self else { return }
+            self.chatInteraction.showPreviewSender([url], true, nil)
+            self.closePopover()
         }
         genericView.useResult = { [weak self] result, action in
             guard let self else { return }
             switch action {
-            case .draftReply, .polishDraft:
+            case .draftReply, .polishDraft, .translate:
                 self.chatInteraction.updateInput(with: result)
             default:
                 let separator = self.chatInteraction.presentation.effectiveInput.inputText.isEmpty ? "" : "\n\n"
@@ -842,23 +1331,41 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
         }
 
         statusDisposable.set((combineLatest(client.status, store.signal) |> deliverOnMainQueue).start(next: { [weak self] status, state in
-            let enabled = Set(WorkspaceAIFeature.allCases.filter { state.activeProfile.isEnabled($0) })
+            let actions = Set(CodexAssistantAction.allCases.filter { state.activeProfile.isEnabled($0) })
             self?.currentStatus = status
-            self?.genericView.update(status: status, enabledFeatures: enabled)
+            self?.genericView.update(status: status, enabledActions: actions, rangePreset: state.activeProfile.chatRangePreset, agentTitle: state.acp.provider.title)
         }))
 
-        insightDisposable.set((combineLatest(workspaceAIState(postbox: context.account.postbox), store.signal) |> deliverOnMainQueue).start(next: { [weak self] aiState, profileState in
-            guard let self else { return }
-            let suggestions = aiState.insights
-                .filter { $0.profileId == profileState.activeProfile.id && $0.peerId == self.chatInteraction.peerId.toInt64() && !$0.isReviewed }
-                .sorted(by: { $0.generatedAt > $1.generatedAt })
-                .first?.suggestions ?? []
-            self.genericView.updateInsightSuggestions(suggestions)
-        }))
+        genericView.updateHistory(session.entries)
 
-        genericView.updateHistory(historyStore.entries)
+        session.phaseChanged = { [weak self] phase in
+            self?.render(phase)
+        }
+        session.historyChanged = { [weak self] entries in
+            self?.genericView.updateHistory(entries)
+        }
+        /// Pick up whatever ran while the panel was closed.
+        render(session.phase)
 
         readyOnce()
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        /// The composer is the primary control here, so it takes focus on open.
+        genericView.focusComposer()
+
+        /// Popover registers its responder with `ignoreKeys: [.Return, .Delete]`, which lets the
+        /// chat input claim those keys and pull focus out of the composer mid-sentence. A
+        /// higher-priority observer without those exclusions keeps focus where it already is.
+        window?.set(responder: { [weak self] () -> NSResponder? in
+            return self?.genericView.composerResponder
+        }, with: self, priority: .supreme)
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        window?.removeObserver(for: self)
     }
 
     override func updateLocalizationAndTheme(theme: PresentationTheme) {
@@ -876,7 +1383,7 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
         }
 
         let state = store.current
-        let enabled = WorkspaceAIFeature.allCases.filter { state.activeProfile.isEnabled($0) }
+        let enabled = state.activeProfile.advertisedFeatures
         guard !enabled.isEmpty else {
             openSettings()
             return
@@ -895,7 +1402,7 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
                 let reject = options.first(where: { $0.kind == "reject_once" }) ?? options.first(where: { $0.kind == "reject_always" })
                 verifyAlert_button(
                     for: self.context.window,
-                    header: "Codex Permission",
+                    header: "\(self.store.current.acp.provider.title) Permission",
                     information: title,
                     ok: allow.name,
                     cancel: reject?.name ?? strings().modalCancel,
@@ -912,19 +1419,29 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
     }
 
     private func run(action: CodexAssistantAction, customPrompt: String?) {
-        let enabled = store.current.activeProfile.isEnabled(action.feature)
-        guard enabled else {
-            genericView.setResult("Enable \(action.feature.title) for this workspace profile in Settings.", action: nil, loading: false)
+        let profile = store.current.activeProfile
+        guard action == .custom || profile.isEnabled(action) else {
+            session.present(.result(action: nil, text: "Turn on \(action.title) under Chat Actions in Settings."))
+            return
+        }
+        if action.requiresAgent, case .connected = currentStatus {} else if action.requiresAgent {
+            session.present(.result(action: nil, text: "Connect an agent to use \(action.title)."))
             return
         }
 
-        if let activeJobId {
-            coordinator.cancel(activeJobId)
-        }
+        session.cancelActiveJob()
         activeAction = action
         let dateRange = genericView.selectedDateRange
-        response = ""
-        genericView.setResult("Thinking…", action: action, loading: true)
+        session.present(.running(action: action, text: "Thinking…"))
+
+        if action == .voiceToText {
+            transcribeVoiceMessages(in: dateRange)
+            return
+        }
+        if action == .generateImage {
+            generateImage(description: customPrompt)
+            return
+        }
 
         let location = ChatLocationInput.peer(peerId: chatInteraction.peerId, threadId: chatInteraction.chatLocation.threadId)
         let history = context.account.viewTracker.aroundMessageOfInterestHistoryViewForLocation(
@@ -959,6 +1476,205 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
         }))
     }
 
+    /// Codex writes the image itself via its `image_gen` tool, so it is pointed at a scratch
+    /// directory and the result is picked up from disk rather than parsed out of the reply.
+    private func generateImage(description: String?) {
+        guard let description, !description.isEmpty else {
+            activeAction = nil
+            session.present(.result(action: nil, text: "Describe the image in the box above, then tap Generate image."))
+            return
+        }
+
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("telegramwork-codex-images", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            activeAction = nil
+            session.present(.result(action: nil, text: "Could not create a folder for the image."))
+            return
+        }
+
+        let prompt = """
+        Use your image_gen tool to create this image: \(description)
+
+        Save the generated image as a PNG inside \(directory.path) and write nothing outside that folder. When you are finished, reply with the absolute path of the file you saved and nothing else.
+        """
+
+        activeAction = nil
+        session.submit(
+            prompt: prompt,
+            action: .generateImage,
+            customPrompt: description,
+            dateRange: genericView.selectedDateRange,
+            streams: false,
+            transform: { text in
+                if let url = CodexAssistantController.newestImage(in: directory) {
+                    return .image(url: url, caption: description)
+                }
+                let reply = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                return .result(
+                    action: nil,
+                    text: reply.isEmpty ? "The agent did not produce an image. Its image_gen tool may not be available." : reply
+                )
+            }
+        )
+    }
+
+    /// Static so the session's completion closure never has to keep the panel alive.
+    private static func newestImage(in directory: URL) -> URL? {
+        let extensions: Set<String> = ["png", "jpg", "jpeg", "webp", "heic", "gif"]
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+        return contents
+            .filter { extensions.contains($0.pathExtension.lowercased()) }
+            .sorted { lhs, rhs in
+                let lhsDate = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let rhsDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return lhsDate > rhsDate
+            }
+            .first
+    }
+
+    /// Voice notes never reach the agent — `run` only reads `message.text`, and the ACP channel
+    /// carries text only. So this action goes to a local speech-to-text server when one is
+    /// configured, and otherwise to Telegram's own (Premium) transcription.
+    private func transcribeVoiceMessages(in dateRange: ClosedRange<Date>) {
+        let location = ChatLocationInput.peer(peerId: chatInteraction.peerId, threadId: chatInteraction.chatLocation.threadId)
+        let history = context.account.viewTracker.aroundMessageOfInterestHistoryViewForLocation(
+            location,
+            count: 1_000,
+            tag: nil,
+            orderStatistics: [],
+            additionalData: []
+        ) |> take(1) |> deliverOnMainQueue
+
+        historyDisposable.set(history.start(next: { [weak self] value in
+            guard let self else { return }
+            let voiceMessages = value.0.entries.map(\.message).filter { message in
+                let date = Date(timeIntervalSince1970: TimeInterval(message.timestamp))
+                guard dateRange.contains(date) else { return false }
+                return message.media.contains { media in
+                    guard let file = media as? TelegramMediaFile else { return false }
+                    return file.isVoice || file.isInstantVideo
+                }
+            }.suffix(20)
+
+            guard !voiceMessages.isEmpty else {
+                self.activeAction = nil
+                self.session.present(.result(action: nil, text: "No voice messages in the selected range."))
+                return
+            }
+
+            let localSettings = self.store.current.activeProfile.localTranscription
+            if localSettings.isEnabled {
+                self.transcribeLocally(Array(voiceMessages), settings: localSettings)
+                return
+            }
+
+            let signals = voiceMessages.map { message in
+                return self.context.engine.messages.transcribeAudio(messageId: message.id)
+                |> map { result -> (Message, EngineAudioTranscriptionResult) in
+                    return (message, result)
+                }
+            }
+
+            self.historyDisposable.set((combineLatest(signals) |> deliverOnMainQueue).start(next: { [weak self] results in
+                guard let self else { return }
+                self.renderTranscriptions(results.map(\.0))
+            }))
+        }))
+    }
+
+    /// Each note is posted to the local server; one failure must not lose the other results.
+    private func transcribeLocally(_ messages: [Message], settings: WorkspaceLocalTranscription) {
+        let account = context.account
+        let signals: [Signal<(Message, String), NoError>] = messages.compactMap { message in
+            guard let file = message.media.compactMap({ $0 as? TelegramMediaFile }).first(where: { $0.isVoice || $0.isInstantVideo }) else {
+                return nil
+            }
+            return WorkspaceVoiceTranscriber.shared.transcribe(message: message, file: file, account: account, settings: settings)
+            |> map { text in (message, text) }
+            |> `catch` { error in
+                return .single((message, "[\(error.errorDescription ?? "transcription failed")]"))
+            }
+        }
+
+        guard !signals.isEmpty else {
+            activeAction = nil
+            session.present(.result(action: nil, text: "No voice messages in the selected range."))
+            return
+        }
+
+        historyDisposable.set((combineLatest(signals) |> deliverOnMainQueue).start(next: { [weak self] results in
+            guard let self else { return }
+            let formatter = DateFormatter()
+            formatter.dateStyle = .short
+            formatter.timeStyle = .short
+            let lines = results.sorted(by: { $0.0.timestamp < $1.0.timestamp }).map { message, text -> String in
+                let author = message.flags.contains(.Incoming) ? (message.author?.displayTitle ?? "Participant") : "You"
+                let stamp = formatter.string(from: Date(timeIntervalSince1970: TimeInterval(message.timestamp)))
+                return "\(stamp) · \(author): \(text)"
+            }
+            self.activeAction = nil
+            self.session.present(.result(action: .voiceToText, text: lines.joined(separator: "\n\n")))
+        }))
+    }
+
+    /// `transcribeAudio` reports only success/failure; the text arrives as a message attribute,
+    /// so the messages have to be re-read once the requests settle.
+    private func renderTranscriptions(_ messages: [Message]) {
+        let messageIds = messages.map { $0.id }
+        let refreshed = context.account.postbox.transaction { transaction -> [Message] in
+            return messageIds.compactMap { transaction.getMessage($0) }
+        } |> deliverOnMainQueue
+
+        historyDisposable.set(refreshed.start(next: { [weak self] messages in
+            guard let self else { return }
+            let formatter = DateFormatter()
+            formatter.dateStyle = .short
+            formatter.timeStyle = .short
+
+            var lines: [String] = []
+            var pending = 0
+            for message in messages.sorted(by: { $0.timestamp < $1.timestamp }) {
+                let author = message.flags.contains(.Incoming) ? (message.author?.displayTitle ?? "Participant") : "You"
+                let stamp = formatter.string(from: Date(timeIntervalSince1970: TimeInterval(message.timestamp)))
+                guard let attribute = message.attributes.compactMap({ $0 as? AudioTranscriptionMessageAttribute }).first else {
+                    pending += 1
+                    continue
+                }
+                if let error = attribute.error {
+                    lines.append("\(stamp) · \(author): [\(error == .tooLong ? "too long to transcribe" : "could not be transcribed")]")
+                } else if attribute.isPending {
+                    pending += 1
+                } else if !attribute.text.isEmpty {
+                    lines.append("\(stamp) · \(author): \(attribute.text)")
+                }
+            }
+
+            self.activeAction = nil
+            if lines.isEmpty {
+                let reason = pending > 0
+                    ? "Telegram is still transcribing. Try again in a moment."
+                    : "Nothing could be transcribed. Voice transcription requires Telegram Premium."
+                self.session.present(.result(action: nil, text: reason))
+                return
+            }
+            if pending > 0 {
+                lines.append("")
+                lines.append("\(pending) message\(pending == 1 ? "" : "s") still transcribing.")
+            }
+            self.session.present(.result(action: .voiceToText, text: lines.joined(separator: "\n\n")))
+        }))
+    }
+
     private func prompt(action: CodexAssistantAction, customPrompt: String?, transcript: String, dateRange: ClosedRange<Date>, omittedCount: Int) {
         let draft = chatInteraction.presentation.effectiveInput.inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         let task: String
@@ -970,12 +1686,23 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
         case .polishDraft:
             guard !draft.isEmpty else {
                 activeAction = nil
-                genericView.setResult("Write a draft in the composer first, then choose Polish draft.", action: nil, loading: false)
+                session.present(.result(action: nil, text: "Write a draft in the composer first, then choose Polish draft."))
                 return
             }
             task = "Rewrite my draft so it is clear, concise, and natural while preserving its meaning and tone. Return only the rewritten message.\n\nMy draft:\n\(draft)"
         case .actionItems:
             task = "Extract concrete action items from the conversation. Include owner and deadline when stated; do not invent missing details."
+        case .translate:
+            /// Translating your own unsent draft is the more useful behaviour when one exists.
+            let language = customPrompt ?? codexSelectedTranslationLanguage.title
+            if draft.isEmpty {
+                task = "Translate the conversation into \(language). Keep each speaker's name and the original order, one line per message. Return only the translation."
+            } else {
+                task = "Translate my draft into \(language). Preserve its meaning and tone, and return only the translated message.\n\nMy draft:\n\(draft)"
+            }
+        case .voiceToText, .generateImage:
+            /// Both are handled before this point and never reach the transcript prompt.
+            return
         case .custom:
             task = customPrompt ?? "Help me with this conversation."
         }
@@ -1030,35 +1757,14 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
     }
 
     private func send(prompt: String, action: CodexAssistantAction, customPrompt: String?, dateRange: ClosedRange<Date>) {
-        activeJobId = coordinator.submit(prompt: prompt, onText: { [weak self] chunk in
-            guard let self, self.activeAction == action else { return }
-            self.response += chunk
-            self.genericView.appendResult(chunk, action: action)
-        }, completion: { [weak self] result in
-            guard let self, self.activeAction == action else { return }
-            self.activeJobId = nil
-            switch result {
-            case let .success(text):
-                self.response = text
-                self.genericView.setResult(text, action: action, loading: false)
-                let entry = CodexAssistantHistoryEntry(
-                    id: UUID(),
-                    action: action,
-                    customPrompt: customPrompt,
-                    fromDate: dateRange.lowerBound,
-                    toDate: dateRange.upperBound,
-                    createdAt: Date(),
-                    response: String(text.prefix(50_000))
-                )
-                self.genericView.updateHistory(self.historyStore.add(entry))
-            case let .failure(error):
-                if let jobError = error as? WorkspaceAIJobError, case .cancelled = jobError {
-                    break
-                }
-                self.genericView.setResult(error.localizedDescription, action: nil, loading: false)
-            }
-            self.activeAction = nil
-        })
+        activeAction = nil
+        session.submit(
+            prompt: prompt,
+            action: action,
+            customPrompt: customPrompt,
+            dateRange: dateRange,
+            streams: true
+        )
     }
 
     private func dateRangeDescription(_ range: ClosedRange<Date>) -> String {
@@ -1069,12 +1775,11 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
     }
 
     deinit {
-        if let activeJobId {
-            coordinator.cancel(activeJobId)
-        }
+        /// Detach only — the session keeps running so the result is waiting on reopen.
+        session.phaseChanged = nil
+        session.historyChanged = nil
         statusDisposable.dispose()
         historyDisposable.dispose()
-        insightDisposable.dispose()
     }
 }
 
@@ -1144,7 +1849,7 @@ class ChatInputActionsView: View {
         suggestPost.scaleOnClick = true
         codex.scaleOnClick = true
         codex.highlightHovered = true
-        codex.toolTip = "Codex"
+        codex.toolTip = WorkspaceProfileStore.shared(accountId: chatInteraction.context.account.id.int64).current.acp.provider.title
 
         codex.set(handler: { [weak self] _ in
             self?.showCodex()
@@ -1214,7 +1919,7 @@ class ChatInputActionsView: View {
         let profileStore = WorkspaceProfileStore.shared(accountId: chatInteraction.context.account.id.int64)
         codexProfileDisposable.set((profileStore.signal |> deliverOnMainQueue).start(next: { [weak self] state in
             guard let self else { return }
-            let isVisible = state.activeProfile.isEnabled(.chatSummaries) || state.activeProfile.isEnabled(.replyDrafts)
+            let isVisible = CodexAssistantAction.configurable.contains { state.activeProfile.isEnabled($0) }
             guard self.codex.isHidden == isVisible else { return }
             self.codex.isHidden = !isVisible
             if !isVisible {
@@ -1325,12 +2030,15 @@ class ChatInputActionsView: View {
         }
         let controller = CodexAssistantController(chatInteraction: chatInteraction)
         codexController = controller
+        /// `static` disables the mouse-out auto-hide. A request in flight must survive the cursor
+        /// leaving the window; clicking outside or pressing Escape still dismisses the panel.
         showPopover(
             for: codex,
             with: controller,
             edge: .maxX,
             inset: NSMakePoint(frame.width - codex.frame.maxX + 18, 10),
-            delayBeforeShown: 0.0
+            delayBeforeShown: 0.0,
+            static: true
         )
     }
     

@@ -2225,7 +2225,6 @@ class PeersListController: TelegramGenericViewController<PeerListContainerView>,
         }
         if mode.isPlain {
             let workspaceProfiles = WorkspaceProfileStore.shared(accountId: context.account.id.int64)
-            WorkspaceAIAutomationManagerRegistry.shared.start(context: context)
             self.storyList = combineLatest(
                 context.engine.messages.storySubscriptions(isHidden: isContacts || mode.groupId == .archive),
                 workspaceProfiles.signal
@@ -2710,10 +2709,6 @@ class PeersListController: TelegramGenericViewController<PeerListContainerView>,
         }, revealStoriesState: { [weak self] in
             self?.revealStoriesState()
         }, setupFilter: { [weak self] filter in
-            if filter.id == WorkspaceProfileStore.aiInboxFilterId {
-                context.bindings.rootNavigation().push(WorkspaceAIInboxController(context: context))
-                return
-            }
             self?.navigationController?.back()
             self?.updateState { current in
                 var current = current
@@ -2722,9 +2717,7 @@ class PeersListController: TelegramGenericViewController<PeerListContainerView>,
             }
             self?.scrollup(force: true)
         }, openFilterSettings: { filter in
-            if filter.id == WorkspaceProfileStore.aiInboxFilterId {
-                context.bindings.rootNavigation().push(WorkspaceAIInboxController(context: context))
-            } else if filter.id == WorkspaceProfileStore.profileChatsFilterId {
+            if filter.id == WorkspaceProfileStore.profileChatsFilterId {
                 context.bindings.rootNavigation().push(WorkspaceProfilesController(context: context))
             } else if case .filter = filter {
                 context.bindings.rootNavigation().push(ChatListFilterController(context: context, filter: filter))
@@ -2732,16 +2725,6 @@ class PeersListController: TelegramGenericViewController<PeerListContainerView>,
                 context.bindings.rootNavigation().push(ChatListFiltersListController(context: context))
             }
         }, tabsMenuItems: { filter, unreadCount, allMuted in
-            if filter.id == WorkspaceProfileStore.aiInboxFilterId {
-                return [
-                    ContextMenuItem("Open AI Inbox", handler: {
-                        context.bindings.rootNavigation().push(WorkspaceAIInboxController(context: context))
-                    }),
-                    ContextMenuItem("AI Inbox Settings…", handler: {
-                        context.bindings.rootNavigation().push(WorkspaceProfilesController(context: context))
-                    })
-                ]
-            }
             if filter.id == WorkspaceProfileStore.profileChatsFilterId {
                 return [ContextMenuItem("Manage Profile Chats…", handler: {
                     context.bindings.rootNavigation().push(WorkspaceProfilesController(context: context))

@@ -1,0 +1,84 @@
+# Installing Kite
+
+Kite is a macOS Telegram client with an AI agent built into the composer.
+
+## Requirements
+
+- macOS 10.13 or later
+- Apple silicon or Intel (the build is universal)
+
+## Install
+
+1. Download `Kite-<version>.dmg`.
+2. Open it and drag **Kite** to Applications.
+3. **The first launch needs an extra step** — see below.
+
+## First launch
+
+Kite is signed, but with an ad-hoc signature rather than an Apple Developer ID, and it is
+not notarized. macOS will refuse to open it on the first try:
+
+> "Kite" cannot be opened because Apple cannot check it for malicious software.
+
+To open it anyway:
+
+- **Right-click** (or Control-click) Kite in Applications and choose **Open**, then confirm.
+
+Only the first launch needs this. If the dialog offers no Open button, go to
+**System Settings → Privacy & Security**, scroll to the bottom, and click **Open Anyway**
+next to the message about Kite.
+
+If you would rather clear the quarantine flag directly:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Kite.app
+```
+
+## Connecting an agent
+
+Kite talks to coding agents over [ACP](https://agentclientprotocol.com) (Agent Client
+Protocol) and starts the agent as a child process. Configure this in
+**Settings → Profiles & Automation**. Supported out of the box:
+
+| Agent    | Command                                    |
+| -------- | ------------------------------------------ |
+| Codex    | `npx -y @agentclientprotocol/codex-acp`    |
+| Claude   | `npx -y @zed-industries/claude-code-acp`   |
+| opencode | `opencode acp`                             |
+
+Any other ACP-speaking agent can be pointed at with a custom command. Once connected, Kite
+asks the agent which models it offers and lets you pick a different one per chat action.
+
+### If an agent fails to start
+
+Kite reports the agent's stderr in the settings screen. The two usual causes:
+
+- **The agent is not on `PATH`.** Apps launched from Finder get a minimal `PATH`. Kite
+  already prepends the common install locations (`~/.bun/bin`, `~/.local/bin`,
+  `/opt/homebrew/bin`, `/usr/local/bin` and others), but an agent installed elsewhere needs
+  its absolute path in the command field.
+- **A quarantined helper binary.** Agents that unpack native modules at startup (opencode
+  does this) can have those files blocked by Gatekeeper. Clearing quarantine on the agent's
+  install directory fixes it.
+
+## Local voice transcription
+
+Voice-to-text can run entirely on your machine against any OpenAI-compatible transcription
+endpoint. With [whisper.cpp](https://github.com/ggerganov/whisper.cpp):
+
+```sh
+whisper-server -m ~/.whisper-models/ggml-base.bin \
+  --host 127.0.0.1 --port 8080 \
+  --inference-path /v1/audio/transcriptions \
+  --convert -l auto
+```
+
+Then enable local transcription in **Settings → Profiles & Automation** and point it at
+`http://127.0.0.1:8080/v1/audio/transcriptions`.
+
+## Upgrading from TelegramWork
+
+Kite was previously called TelegramWork. Because the app group container is derived from the
+bundle identifier, the first launch after upgrading moves your accounts and cache from the
+old container to the new one automatically. Quit TelegramWork before launching Kite the
+first time — both reading the same database at once can corrupt it.

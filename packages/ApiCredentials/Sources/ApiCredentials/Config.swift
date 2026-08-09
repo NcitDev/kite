@@ -43,6 +43,9 @@ public final class ApiEnvironment {
     /// the rename.
     public static func migrateFromLegacyBundleId() {
         let manager = FileManager.default
+        guard !UserDefaults.standard.bool(forKey: legacyMigrationKey) else {
+            return
+        }
         guard let legacyRoot = manager.containerURL(forSecurityApplicationGroupIdentifier: teamId + "." + legacyBundleId),
               let currentRoot = manager.containerURL(forSecurityApplicationGroupIdentifier: group),
               legacyRoot != currentRoot else {
@@ -52,19 +55,23 @@ public final class ApiEnvironment {
         guard !legacyContents.isEmpty else {
             return
         }
-        /// Something may already have created the empty per-source subdirectory, so look for
-        /// actual content rather than trusting that the new container is untouched.
-        let existing = (try? manager.contentsOfDirectory(atPath: currentRoot.path)) ?? []
-        let populated = existing.contains(where: { name in
-            let inner = (try? manager.contentsOfDirectory(atPath: currentRoot.appendingPathComponent(name).path)) ?? []
-            return !inner.isEmpty
-        })
-        guard !populated else {
-            return
+        /// Moving item by item, and never over something that already exists, means this does
+        /// not depend on the new container being untouched. It is not: the per-source
+        /// subdirectory is created, and given a metadata file by the OS, before this runs.
+        for value in legacyContents where !value.hasPrefix(".") {
+            let destination = currentRoot.appendingPathComponent(value)
+            guard !manager.fileExists(atPath: destination.path) else {
+                continue
+            }
+            try? manager.moveItem(at: legacyRoot.appendingPathComponent(value), to: destination)
         }
-        for value in legacyContents {
-            try? manager.moveItem(at: legacyRoot.appendingPathComponent(value), to: currentRoot.appendingPathComponent(value))
-        }
+        UserDefaults.standard.set(true, forKey: legacyMigrationKey)
+    }
+
+    /// Set once the move above has been attempted, so a later launch cannot pull a stale
+    /// container back over data the app has since written.
+    private static var legacyMigrationKey: String {
+        return "kite.migratedFromLegacyBundleId"
     }
 
     public static func migrate() {

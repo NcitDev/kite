@@ -38,7 +38,7 @@ Open the panel from the composer and run an action against the current conversat
 agent reads the chat; it never sends anything. Results land in a review area, and you decide
 whether to use them.
 
-<img src="docs/images/ai-panel.png" width="760" alt="AI actions panel in a chat">
+<img src="docs/images/ai-panel.png" width="420" alt="AI actions panel in a chat">
 
 | Action | What it does |
 | --- | --- |

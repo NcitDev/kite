@@ -134,7 +134,7 @@ enum CodexAssistantAction: String, Codable, CaseIterable {
         case .generateImage:
             return "Generate image"
         case .custom:
-            return "Ask Codex"
+            return "Ask agent"
         }
     }
 

@@ -1,78 +1,155 @@
 <div align="center">
-  <img src="Telegram-Mac/Assets.xcassets/AppIcon.appiconset/Logo_1024.png"
-      width="125" 
-      height="125">
-  
-  <h2 align="center">Telegram for macOS</h2>
+
+<img src="docs/images/icon.png" width="128" alt="Kite">
+
+# Kite
+
+**A macOS Telegram client with a coding agent in the composer.**
+
+Kite is a fork of [TelegramSwift](https://github.com/overtake/TelegramSwift) that adds two
+things: **profiles**, which split one account into separate working contexts, and an **AI
+panel** that runs a real agent — Codex, Claude, or opencode — against the conversation in
+front of you.
+
+[Install](README-INSTALL.md) · [LLM integration notes](docs/LLM_INTEGRATIONS.md) · [Building](INSTALL.md)
+
 </div>
 
-![Telegram macOS screenshot](images/tg.png)
+---
 
-[**Telegram**](https://telegram.org) is a messaging app with a focus on speed and security. It’s superfast, simple, and free! This repo contains the official source code for [Telegram for macOS](https://macos.telegram.org/).
+## Profiles
 
-## Get it
+One Telegram account usually holds several unrelated lives: a job, a side project, family.
+A profile is a saved slice of that account — a set of chat folders, plus its own agent setup.
 
-[![Download on the Mac App Store](images/mas_badge.png)](https://itunes.apple.com/us/app/telegram/id747648890?mt=12)
+<img src="docs/images/settings.png" width="760" alt="Profiles & Automation settings">
 
+- **Visible chat folders** — pick which folders a profile shows. Switching profile changes the
+  chat list, so work chats are not sitting next to family chats.
+- **Scoped search** — global search is restricted to the chats the active profile can see, so
+  results from another context do not leak in.
+- **Per-profile agent setup** — each profile keeps its own agent, model and enabled actions.
 
-### Using Homebrew
+Everything lives under **Settings → Profiles & Automation**.
 
+## The AI panel
+
+Open the panel from the composer and run an action against the current conversation. The
+agent reads the chat; it never sends anything. Results land in a review area, and you decide
+whether to use them.
+
+<img src="docs/images/ai-panel.png" width="760" alt="AI actions panel in a chat">
+
+| Action | What it does |
+| --- | --- |
+| **Summarize** | Condenses the conversation over the selected range |
+| **Action items** | Pulls out commitments and open questions |
+| **Draft reply** | Writes a reply for you to review before sending |
+| **Polish draft** | Rewrites what you have already typed |
+| **Translate** | Translates into a language you pick |
+| **Voice to text** | Transcribes voice messages, optionally fully offline |
+| **Generate image** | Generates an image and shows it inline |
+| **Ask agent** | Anything else, in your own words |
+
+Each action can be switched off in settings, so the panel only shows what you actually use.
+
+**Conversation range.** Actions default to today. Turn *Today* off to use a saved range
+instead — 3, 7 or 30 days.
+
+**While it runs.** The panel reports what the agent is doing — thinking, writing, or the name
+of the tool it called — and a request can be stopped at any point. Requests survive the panel
+being closed, so you can start something long and come back to the result.
+
+## Agents
+
+Kite speaks [ACP](https://agentclientprotocol.com) (Agent Client Protocol) over stdio and
+starts the agent as a child process. Nothing is sent to a Kite-operated server; the agent is
+whatever you point it at.
+
+| Agent | Command |
+| --- | --- |
+| Codex | `npx -y @agentclientprotocol/codex-acp` |
+| Claude | `npx -y @zed-industries/claude-code-acp` |
+| opencode | `opencode acp` |
+| Custom | any ACP-speaking binary |
+
+**Models come from the agent, not from a hardcoded list.** On connect, Kite asks the agent
+what it offers and fills the picker from the answer, so a new model appears without waiting
+for a Kite release. Two wire shapes are handled: the `models` object codex-acp reports, and
+the `configOptions` list opencode uses.
+
+**A different model per action.** Summarizing every chat with a frontier model is a waste;
+drafting a careful reply with a small one is a false economy. Set a default, then override it
+per action.
+
+**Saved setups per agent.** Switching from Codex to Claude and back does not lose either
+configuration — command, model and per-action overrides are kept for each.
+
+## Local knowledge
+
+Point a profile at a folder of Markdown — an Obsidian vault, or any notes directory — and the
+agent can cite from it while it works. Retrieval is read-only and runs locally through a
+bundled MCP adapter (`kite_knowledge_mcp.py`). Notes are treated as untrusted quoted data, so
+text inside a note cannot redirect the agent.
+
+## Local voice transcription
+
+Voice-to-text can run entirely on your machine, against any OpenAI-compatible transcription
+endpoint — [whisper.cpp](https://github.com/ggerganov/whisper.cpp), faster-whisper-server,
+LocalAI and Speaches all expose the same API. Nothing leaves the machine, and it works
+without Telegram Premium.
+
+```sh
+whisper-server -m ~/.whisper-models/ggml-base.bin \
+  --host 127.0.0.1 --port 8080 \
+  --inference-path /v1/audio/transcriptions --convert -l auto
 ```
-brew cask install telegram
+
+Then enable it under **Settings → Profiles & Automation → Local transcription**.
+
+## Building
+
+```sh
+git clone --recursive https://github.com/NcitDev/kite.git
+cd kite
+xcodebuild -workspace Telegram-Mac.xcworkspace -scheme Telegram -configuration Release build
 ```
 
-### Using `mas-cli`
+Full prerequisites are in [INSTALL.md](INSTALL.md). To package a distributable build:
 
+```sh
+tools/package_kite.sh /path/to/Kite.app build/dist
 ```
-mas install 747648890
-```
-
-### Manual download
-
-If you would like, you can [download the non-MAS version](https://telegram.org/dl/macos).
-
-You can also [download the beta version](https://telegram.org/dl/macos/beta) if you want to try the latest features and you are prepared for bugs and crashes. If you are running the beta, join the [beta testing chat on Telegram](https://t.me/macswift) to report bugs.
-
-## Contributors
-
-### Contributors on GitHub
-See [this repository’s contributors graph](https://github.com/overtake/TelegramSwift/graphs/contributors).
-
-### Bugs and Suggestions
-You can report bug or suggestions feature for Telegram for macOS on [Telegram’s Bugs & Suggestions platform](https://bugs.telegram.org). Read [the platform tip](https://bugs.telegram.org/c/746) before creating first card.
-
-### Translations
-You can help translate Telegram for macOS on [Telegram’s translations platform](https://translations.telegram.org). Pick your language, then look for the macOS translation set.
-
-<!--### Third-party libraries-->
-<!--See [LIBRARIES](LIBRARIES.md).-->
 
 ## Permissions
-Telegram strives to protect your privacy.  This app asks for as few permissions as possible:
 
-* **Microphone**: You can send voice messages and make audio calls with Telegram.
-* **Camera**: You can set your profile picture using your Mac’s iSight camera.
-* **Location**: You can send your location to friends.
-* **Outgoing network connections**: Telegram needs to connect to the internet to send your messages to your friends.
-* **Incoming network connections**: Telegram needs to accept incoming connections for peer-to-peer voice calls.
-* **User-selected files**: You can save files or images to your Mac.
-* **Downloads folder**: Telegram can automatically download files or images you receive.
+Kite asks for the same permissions as upstream Telegram, and for the same reasons:
+microphone (voice messages and calls), camera (profile pictures), location (sharing your
+location), network access, and access to files you pick or download.
 
-## Shortcuts
-With [Shortcuts](https://github.com/overtake/TelegramSwift/wiki) you can learn how easy is navigate using your devices.
-
-## License
-Telegram for macOS is licensed under the GNU Public License, version 2.0. See [LICENSE](LICENSE) for more information.
+Additionally, Kite **starts the agent you configure as a child process**. That agent runs with
+your user's privileges and can read the folders you point it at. Only configure agents you
+trust.
 
 ## Forking
-You can fork this application and make something awesome! Make sure that your fork follows these five requirements:
 
-1. **Do** [get your own API ID](https://core.telegram.org/api/obtaining_api_id).
-2. **Don’t** call your fork **Telegram** — or at least make sure your users understand that yours is unofficial.
-3. **Don’t** use our standard logo (white paper plane in a blue circle) for your fork.
-3. **Do** read and follow our [security guidelines](https://core.telegram.org/mtproto/security_guidelines) to make sure you take good care of your users’ data and protect their privacy.
-4. **Do** publish your code. The [GPL license](LICENSE) requires it!
+Kite follows the [fork requirements](https://github.com/overtake/TelegramSwift#forking)
+upstream sets out, and if you fork Kite you inherit them:
 
-## How to Build
+1. **Get your own API ID.** Replace the credentials in
+   `packages/ApiCredentials/Sources/ApiCredentials/Config.swift` with your own pair from
+   [my.telegram.org](https://my.telegram.org) — the ones in the tree are not yours to ship.
+2. **Don't call your fork Telegram**, and make sure users understand it is unofficial.
+3. **Don't use Telegram's logo.** Kite's mark is a folded kite, not a paper plane, and it is
+   indigo rather than Telegram blue.
+4. **Follow the [security guidelines](https://core.telegram.org/mtproto/security_guidelines)** —
+   your users' data and privacy depend on it.
+5. **Publish your code.** The [GPL](LICENSE) requires it.
 
-Instructions for building Telegram for macOS are in [INSTALL.md](INSTALL.md).
+## Credits
+
+Kite is a fork of [TelegramSwift](https://github.com/overtake/TelegramSwift) by
+[overtake](https://github.com/overtake), which is the overwhelming majority of the work here.
+Kite is not affiliated with, endorsed by, or connected to Telegram.
+
+Licensed under the GNU General Public License, version 2.0 — see [LICENSE](LICENSE).

@@ -18,21 +18,28 @@ Kite is a macOS Telegram client with an AI agent built into the composer.
 Kite is signed, but with an ad-hoc signature rather than an Apple Developer ID, and it is
 not notarized. macOS will refuse to open it on the first try:
 
-> "Kite" cannot be opened because Apple cannot check it for malicious software.
+> "Kite" Not Opened — Apple could not verify "Kite" is free of malware that may harm your
+> Mac or compromise your privacy.
 
-To open it anyway:
+**On macOS 15 (Sequoia) and later — including macOS 26 — Control-clicking and choosing Open
+no longer works.** Apple removed that bypass. Use one of these instead.
 
-- **Right-click** (or Control-click) Kite in Applications and choose **Open**, then confirm.
+**Through System Settings:**
 
-Only the first launch needs this. If the dialog offers no Open button, go to
-**System Settings → Privacy & Security**, scroll to the bottom, and click **Open Anyway**
-next to the message about Kite.
+1. Double-click Kite, then click **Done** on the dialog. This one attempt is required; the
+   option below does not appear until macOS has blocked the app once.
+2. Open **System Settings → Privacy & Security** and scroll to the **Security** section.
+3. Next to *"Kite" was blocked to protect your Mac*, click **Open Anyway**.
+4. Authenticate, then click **Open Anyway** once more.
 
-If you would rather clear the quarantine flag directly:
+**Or from the Terminal**, which skips all of the above:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Kite.app
 ```
+
+Either way, only the first launch needs it. The flag is applied by the browser that
+downloaded the file, so a copy moved off this machine by other means may not need it at all.
 
 ## Connecting an agent
 

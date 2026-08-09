@@ -105,8 +105,8 @@ ln -s /Applications "$STAGE/Applications"
 # scripts as well — so both files explain dragging it into Terminal instead.
 if [ -d "$REPO/tools/dmg" ]; then
   cp "$REPO/tools/dmg/READ ME FIRST.txt" "$STAGE/"
-  cp "$REPO/tools/dmg/Fix Gatekeeper.command" "$STAGE/"
-  chmod +x "$STAGE/Fix Gatekeeper.command"
+  cp "$REPO/tools/dmg/Install Kite.command" "$STAGE/"
+  chmod +x "$STAGE/Install Kite.command"
 fi
 
 DMG="$OUT/Kite-$VERSION.dmg"

@@ -24,6 +24,10 @@ A profile is a saved slice of that account — a set of chat folders, plus its o
 
 <img src="docs/images/settings.png" width="760" alt="Profiles & Automation settings">
 
+The active profile shows at the bottom of the sidebar, and switching is one click:
+
+<img src="docs/images/profile-switcher.png" width="420" alt="The profile switcher in the sidebar">
+
 - **Visible chat folders** — pick which folders a profile shows. Switching profile changes the
   chat list, so work chats are not sitting next to family chats.
 - **Scoped search** — global search is restricted to the chats the active profile can see, so

@@ -1,12 +1,24 @@
 Kite — installing
 =================
 
-1. Drag Kite onto the Applications folder in this window.
-2. macOS will refuse to open it the first time. Read on.
+The quickest way is the "Install Kite.command" script in this window. It
+copies Kite to Applications, clears the flag that stops it opening, launches
+it, and closes itself.
+
+DOUBLE-CLICKING IT WILL NOT WORK. macOS blocks downloaded scripts as well as
+downloaded apps — a downloaded script that could switch off Gatekeeper would
+make Gatekeeper pointless. To run it:
+
+    1. Open Terminal (Applications > Utilities, or search with Spotlight)
+    2. Type:  bash          <- including the space after it
+    3. Drag "Install Kite.command" into the Terminal window
+    4. Press Return
+
+That is the whole installation.
 
 
-Why macOS blocks it
--------------------
+Why any of this is necessary
+----------------------------
 
     "Kite" Not Opened
     Apple could not verify "Kite" is free of malware that may harm your Mac
@@ -15,53 +27,36 @@ Why macOS blocks it
 This is not a detection. macOS refuses to run any app that has not been
 notarized by Apple, and notarization requires a paid Apple Developer ID that
 this build does not have. The app is signed, but with an ad-hoc signature
-that carries no identity Apple recognises.
+carrying no identity Apple recognises.
 
-You are trusting the person who gave you this file. That is a real decision,
-and no amount of clicking makes it not one.
-
-
-Fixing it — the quick way
--------------------------
-
-Open Terminal (Applications > Utilities, or search for it with Spotlight),
-paste this line, and press Return:
-
-    xattr -dr com.apple.quarantine /Applications/Kite.app
-
-Then open Kite normally. Only the first launch needs this.
+You are trusting whoever gave you this file. That is a real decision, and no
+amount of clicking makes it not one.
 
 
-Fixing it — without typing
---------------------------
+Doing it by hand instead
+------------------------
 
-There is a "Fix Gatekeeper.command" file in this window that does the above
-and then launches Kite.
+1. Drag Kite onto the Applications folder in this window.
+2. Open Terminal, paste this line, and press Return:
 
-DOUBLE-CLICKING IT WILL NOT WORK. macOS blocks downloaded scripts too, for
-the obvious reason that a downloaded script which could switch off Gatekeeper
-would make Gatekeeper pointless. To run it:
+       xattr -dr com.apple.quarantine /Applications/Kite.app
 
-    1. Open Terminal
-    2. Type:  bash          <- including the space after it
-    3. Drag "Fix Gatekeeper.command" into the Terminal window
-    4. Press Return
+3. Open Kite normally.
 
 
-Fixing it — through System Settings
------------------------------------
+Without Terminal at all
+-----------------------
 
-If you would rather not use Terminal at all:
+1. Drag Kite onto the Applications folder in this window.
+2. Double-click Kite and click Done on the warning. This failed attempt is
+   required — the option below does not appear until macOS has blocked the
+   app at least once.
+3. Open System Settings > Privacy & Security and scroll to Security.
+4. Next to '"Kite" was blocked to protect your Mac', click Open Anyway.
+5. Authenticate, then click Open Anyway again.
 
-    1. Double-click Kite and click Done on the warning. This failed attempt
-       is required — the option below does not appear until macOS has
-       blocked the app at least once.
-    2. Open System Settings > Privacy & Security and scroll to Security.
-    3. Next to '"Kite" was blocked to protect your Mac', click Open Anyway.
-    4. Authenticate, then click Open Anyway again.
-
-Note that on macOS 15 (Sequoia) and later, Control-clicking the app and
-choosing Open no longer works. Apple removed that shortcut.
+On macOS 15 (Sequoia) and later, Control-clicking the app and choosing Open
+no longer works. Apple removed that shortcut.
 
 
 More

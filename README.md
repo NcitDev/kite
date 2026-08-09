@@ -34,9 +34,12 @@ Everything lives under **Settings → Profiles & Automation**.
 
 ## The AI panel
 
-Open the panel from the composer and run an action against the current conversation. The
-agent reads the chat; it never sends anything. Results land in a review area, and you decide
-whether to use them.
+The panel opens from the ✦ button in the composer, next to emoji and voice:
+
+<img src="docs/images/composer.png" width="760" alt="The AI button in the message composer">
+
+From there you run an action against the current conversation. The agent reads the chat; it
+never sends anything. Results land in a review area, and you decide whether to use them.
 
 <img src="docs/images/ai-panel.png" width="420" alt="AI actions panel in a chat">
 

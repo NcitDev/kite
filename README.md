@@ -118,15 +118,20 @@ Kite builds against your own Telegram API credentials. Get a pair from
 ```sh
 git clone --recursive https://github.com/NcitDev/kite.git
 cd kite
-cp packages/ApiCredentials/Credentials.example.swift \
-   packages/ApiCredentials/Sources/ApiCredentials/Credentials.swift
-$EDITOR packages/ApiCredentials/Sources/ApiCredentials/Credentials.swift
+tools/link_credentials.sh          # creates ~/.config/kite/Credentials.swift
+$EDITOR ~/.config/kite/Credentials.swift
+tools/link_credentials.sh          # symlinks it into the build
 xcodebuild -workspace Telegram-Mac.xcworkspace -scheme Telegram -configuration Release build
 ```
 
-That destination is gitignored, so an `api_hash` cannot be committed by accident. The build
-fails without it on purpose — a client shipped on someone else's key gets that key
-rate-limited or banned, and the failure lands on whoever installed it.
+The real file lives outside the repository and is symlinked in, so `git clean -fdx` cannot
+delete your credentials and the link itself is gitignored — an `api_hash` cannot be committed
+by accident. The build fails without it on purpose: a client shipped on someone else's key
+gets that key rate-limited or banned, and the failure lands on whoever installed it.
+
+These values are compiled into the binary and are recoverable from any build with `strings`,
+as they are in every Telegram client. Keeping them out of the repository avoids automated
+scraping of public git history; it does not make them secret.
 
 Full prerequisites are in [INSTALL.md](INSTALL.md). To package a distributable build:
 

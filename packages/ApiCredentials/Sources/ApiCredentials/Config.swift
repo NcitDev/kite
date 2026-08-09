@@ -1,11 +1,13 @@
 import Cocoa
 
 public final class ApiEnvironment {
+    /// Supplied by Credentials.swift, which is gitignored so the hash stays out of the
+    /// repository. Copy Credentials.example.swift into place to build.
     public static var apiId:Int32 {
-        return 9
+        return KiteCredentials.apiId
     }
     public static var apiHash:String {
-        return "3975f648bb682ee889f35483bc618d1c"
+        return KiteCredentials.apiHash
     }
     
     public static var bundleId: String {

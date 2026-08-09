@@ -112,11 +112,21 @@ Then enable it under **Settings → Profiles & Automation → Local transcriptio
 
 ## Building
 
+Kite builds against your own Telegram API credentials. Get a pair from
+[my.telegram.org](https://my.telegram.org) → API development tools, then:
+
 ```sh
 git clone --recursive https://github.com/NcitDev/kite.git
 cd kite
+cp packages/ApiCredentials/Credentials.example.swift \
+   packages/ApiCredentials/Sources/ApiCredentials/Credentials.swift
+$EDITOR packages/ApiCredentials/Sources/ApiCredentials/Credentials.swift
 xcodebuild -workspace Telegram-Mac.xcworkspace -scheme Telegram -configuration Release build
 ```
+
+That destination is gitignored, so an `api_hash` cannot be committed by accident. The build
+fails without it on purpose — a client shipped on someone else's key gets that key
+rate-limited or banned, and the failure lands on whoever installed it.
 
 Full prerequisites are in [INSTALL.md](INSTALL.md). To package a distributable build:
 

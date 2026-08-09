@@ -135,6 +135,13 @@ final class WorkspaceAIJobCoordinator {
                 case .success:
                     if active.response.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         active.completion(.failure(WorkspaceAIJobError.emptyResponse))
+                    } else if let detail = WorkspaceACPClient.modelRejectionDetail(in: active.response) {
+                        /// The request succeeded at the protocol level and the refusal arrived as
+                        /// the reply itself, which is how a raw API error payload used to be shown
+                        /// to the user as though the agent had answered.
+                        let refused = self.client.requestedModel
+                        self.client.fallBackToAgentDefaultModel()
+                        active.completion(.failure(WorkspaceACPClientError.modelUnavailable(model: refused, detail: detail)))
                     } else {
                         active.completion(.success(active.response))
                     }

@@ -101,12 +101,10 @@ cp -R "$APP" "$STAGE/Kite.app"
 ln -s /Applications "$STAGE/Applications"
 
 # Shipped alongside the app because an unnotarized build is refused on first launch and the
-# fix is not discoverable. The .command cannot be double-clicked — macOS blocks downloaded
-# scripts as well — so both files explain dragging it into Terminal instead.
+# fix is not discoverable. Only the instructions ship: a helper script would arrive carrying
+# the same quarantine flag it exists to remove, so it cannot be double-clicked either.
 if [ -d "$REPO/tools/dmg" ]; then
   cp "$REPO/tools/dmg/READ ME FIRST.txt" "$STAGE/"
-  cp "$REPO/tools/dmg/Install Kite.command" "$STAGE/"
-  chmod +x "$STAGE/Install Kite.command"
 fi
 
 DMG="$OUT/Kite-$VERSION.dmg"

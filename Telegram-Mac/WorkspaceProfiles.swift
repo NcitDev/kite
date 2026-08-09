@@ -798,30 +798,198 @@ final class WorkspaceACPClient {
     private let modelsPromise = ValuePromise<[WorkspaceACPModel]>([], ignoreRepeated: true)
     private let currentModelPromise = ValuePromise<String>("", ignoreRepeated: true)
     private var modelUsesConfigOption = false
+    /// The model the agent last confirmed it is running, so a rejected switch can fall back
+    /// to the truth rather than leaving the UI showing a model that never took effect.
+    private var reportedModel = ""
     /// A GUI app launched by launchd inherits only `/usr/bin:/bin:/usr/sbin:/sbin`, so the
-    /// package managers agents are installed with — Homebrew, bun, npm, asdf — are invisible to
+    /// package managers agents are installed with — Homebrew, bun, npm, nvm — are invisible to
     /// it and `/usr/bin/env <agent>` fails. Put the usual install locations back on PATH.
-    static func agentEnvironment() -> [String: String] {
+    static func agentSearchPath() -> [String] {
+        var combined: [String] = []
+        var seen = Set<String>()
+        func add(_ directory: String) {
+            let path = directory.trimmingCharacters(in: .whitespaces)
+            guard !path.isEmpty, seen.insert(path).inserted else { return }
+            combined.append(path)
+        }
+        /// The login shell reflects what this particular user actually configured, so it comes
+        /// first and covers install locations no hardcoded list could know about.
+        (loginShellEnvironment["PATH"] ?? "").components(separatedBy: ":").forEach(add)
+        knownAgentDirectories().filter { FileManager.default.fileExists(atPath: $0) }.forEach(add)
+        (ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
+            .components(separatedBy: ":")
+            .forEach(add)
+        return combined
+    }
+
+    /// Variables that describe the probe shell's own session rather than the user's setup;
+    /// carrying them into the agent would point it at the wrong directory.
+    private static let sessionLocalVariables: Set<String> = ["PWD", "OLDPWD", "SHLVL", "_"]
+
+    static func agentEnvironment(searchPath: [String]) -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
+        /// Agents read their credentials from the environment, and users export those in the
+        /// same shell profile that sets up PATH. Inheriting the whole thing is what makes the
+        /// agent behave the way it does when the user runs it in a terminal themselves.
+        for (key, value) in loginShellEnvironment where !sessionLocalVariables.contains(key) {
+            environment[key] = value
+        }
+        /// The agent spawns its own tooling, so it needs the widened PATH too, not just us.
+        environment["PATH"] = searchPath.joined(separator: ":")
+        return environment
+    }
+
+    /// Bin directories the common package managers use. Version managers get a directory scan
+    /// because they keep one bin directory per installed runtime version.
+    private static func knownAgentDirectories() -> [String] {
         let home = NSHomeDirectory()
-        let candidates = [
+        var directories = [
             "\(home)/.bun/bin",
             "\(home)/.local/bin",
+            "\(home)/.opencode/bin",
             "\(home)/.volta/bin",
             "\(home)/.asdf/shims",
+            "\(home)/.mise/shims",
+            "\(home)/.local/share/mise/shims",
             "\(home)/.npm-global/bin",
+            "\(home)/.npm-packages/bin",
+            "\(home)/.yarn/bin",
+            "\(home)/Library/pnpm",
+            "\(home)/.cargo/bin",
+            "\(home)/go/bin",
+            "\(home)/.nix-profile/bin",
+            "/nix/var/nix/profiles/default/bin",
             "/opt/homebrew/bin",
-            "/usr/local/bin"
+            "/usr/local/bin",
+            "/opt/local/bin"
         ]
-        let existing = (environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
-            .components(separatedBy: ":")
-            .filter { !$0.isEmpty }
-        var combined = candidates.filter { FileManager.default.fileExists(atPath: $0) }
-        for entry in existing where !combined.contains(entry) {
-            combined.append(entry)
+        directories.append(contentsOf: versionedDirectories(in: "\(home)/.nvm/versions/node", suffix: "bin"))
+        directories.append(contentsOf: versionedDirectories(in: "\(home)/.fnm/node-versions", suffix: "installation/bin"))
+        directories.append(contentsOf: versionedDirectories(in: "\(home)/Library/Application Support/fnm/node-versions", suffix: "installation/bin"))
+        return directories
+    }
+
+    private static func versionedDirectories(in root: String, suffix: String) -> [String] {
+        guard let versions = try? FileManager.default.contentsOfDirectory(atPath: root) else {
+            return []
         }
-        environment["PATH"] = combined.joined(separator: ":")
+        return versions.sorted().reversed().map { "\(root)/\($0)/\(suffix)" }
+    }
+
+    /// The environment the user's own shell would give the agent, read once: spawning a shell
+    /// is not free, and startup files do not change under us mid-session.
+    ///
+    /// `env -0` rather than reading `$PATH` directly, because a shell variable has to be
+    /// expanded by that shell's own rules — in fish `$PATH` is a list and `printf %s "$PATH"`
+    /// yields only its first element. Asking `env` for the exported environment sidesteps the
+    /// syntax of the shell entirely, and brings the agent's API keys along with the PATH.
+    private static let loginShellEnvironment: [String: String] = {
+        let configured = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        let probed = probeShellEnvironment(shell: configured)
+        /// A shell whose startup files failed, timed out, or rejected the flags leaves us no
+        /// better off than the bare GUI environment, so fall back to a plain POSIX login shell
+        /// before giving up on finding anything at all.
+        if probed.isEmpty, configured != "/bin/sh" {
+            return probeShellEnvironment(shell: "/bin/sh")
+        }
+        return probed
+    }()
+
+    private static func probeShellEnvironment(shell: String) -> [String: String] {
+        guard FileManager.default.isExecutableFile(atPath: shell) else { return [:] }
+        /// Startup files are free to print banners, so the environment is fenced off rather
+        /// than read as the whole of stdout.
+        let marker = "__KITE_ACP_ENV__"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: shell)
+        /// `-l` runs the login profile, and `-i` is what makes zsh read `.zshrc`, which is where
+        /// most people actually add their package manager to PATH. POSIX sh and dash have no
+        /// interactive mode to ask for, and passing `-i` to them fails the probe outright.
+        let name = (shell as NSString).lastPathComponent.lowercased()
+        let flags = (name == "sh" || name == "dash") ? ["-l", "-c"] : ["-i", "-l", "-c"]
+        process.arguments = flags + ["printf %s '\(marker)'; env -0"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        /// An interactive shell that decides to read from stdin must hit EOF, not block.
+        process.standardInput = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return [:]
+        }
+        /// A startup file can hang forever, and the agent still has to be able to launch.
+        let watchdog = DispatchWorkItem {
+            if process.isRunning {
+                process.terminate()
+            }
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 3.0, execute: watchdog)
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        watchdog.cancel()
+        /// Exit status is not checked: an interactive shell can report a non-zero status from
+        /// something in its startup files while still having printed a perfectly good
+        /// environment. Decoding is lenient because an exported value need not be valid UTF-8.
+        let output = String(decoding: data, as: UTF8.self)
+        guard let fenced = output.range(of: marker) else { return [:] }
+        var environment: [String: String] = [:]
+        for entry in output[fenced.upperBound...].components(separatedBy: "\0") {
+            /// Split on the first `=` only: values legitimately contain them.
+            guard let separator = entry.firstIndex(of: "="), separator != entry.startIndex else {
+                continue
+            }
+            environment[String(entry[entry.startIndex..<separator])] = String(entry[entry.index(after: separator)...])
+        }
         return environment
+    }
+
+    /// Where the agent's real binary lives, or the command that could not be found.
+    enum LaunchResolution {
+        case resolved(executable: String, arguments: [String])
+        case missing(command: String)
+    }
+
+    /// `/usr/bin/env <agent>` reports a missing agent as an opaque exit 127, long after the
+    /// process started. Do the PATH lookup here instead, so the agent launches from an absolute
+    /// path and a genuinely missing one is named.
+    static func resolveLaunch(executable: String, arguments: [String], searchPath: [String]) -> LaunchResolution {
+        /// The Custom provider starts with nothing filled in, and `URL(fileURLWithPath:)` does
+        /// not accept an empty path.
+        let executable = executable.trimmingCharacters(in: .whitespaces)
+        guard !executable.isEmpty else {
+            return .missing(command: arguments.first ?? "")
+        }
+        /// `env` exists only to perform this lookup, so skip it — but not when it is carrying
+        /// `NAME=value` assignments or flags, which only `env` itself knows how to apply.
+        if URL(fileURLWithPath: executable).lastPathComponent == "env",
+           let command = arguments.first,
+           !command.contains("="),
+           !command.hasPrefix("-") {
+            guard let absolute = locate(command: command, in: searchPath) else {
+                return .missing(command: command)
+            }
+            return .resolved(executable: absolute, arguments: Array(arguments.dropFirst()))
+        }
+        guard let absolute = locate(command: executable, in: searchPath) else {
+            return .missing(command: executable)
+        }
+        return .resolved(executable: absolute, arguments: arguments)
+    }
+
+    private static func locate(command: String, in searchPath: [String]) -> String? {
+        guard !command.isEmpty else { return nil }
+        if command.contains("/") {
+            let path = (command as NSString).expandingTildeInPath
+            return FileManager.default.isExecutableFile(atPath: path) ? path : nil
+        }
+        for directory in searchPath {
+            let candidate = (directory as NSString).appendingPathComponent(command)
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+        return nil
     }
 
     /// Tail of the agent's stderr, so a non-zero exit can say why instead of just the code.
@@ -867,10 +1035,50 @@ final class WorkspaceACPClient {
             self.sendRequest(method: method, params: params) { [weak self] response in
                 guard let self else { return }
                 if response["error"] == nil {
+                    self.reportedModel = modelId
                     self.currentModelPromise.set(modelId)
+                } else {
+                    /// An agent rejects a model the account is not entitled to. Showing it as
+                    /// current anyway would be a lie, and re-requesting it on every prompt turns
+                    /// one rejection into an error on each message, so drop back to the model the
+                    /// agent says it is actually running.
+                    self.configuration?.model = ""
+                    self.currentModelPromise.set(self.reportedModel)
                 }
             }
         }
+    }
+
+    /// Recognises an agent refusing the requested model. Codex reports an entitlement failure
+    /// as a raw 400 payload in its reply text rather than as an ACP error, so the response body
+    /// is the only place it can be seen — which is why it used to reach the user verbatim.
+    static func modelRejectionDetail(in text: String) -> String? {
+        let lowered = text.lowercased()
+        let refused = lowered.contains("not supported when using")
+            || (lowered.contains("invalid_request_error") && lowered.contains("model"))
+            || (lowered.contains("model") && lowered.contains("does not exist"))
+        guard refused else { return nil }
+        /// Prefer the API's own sentence over the whole JSON envelope.
+        if let range = text.range(of: "\"message\"[^\"]*\"[^\"]+\"", options: .regularExpression),
+           let quoted = text[range].range(of: "\"[^\"]+\"$", options: .regularExpression) {
+            return String(text[range][quoted].dropFirst().dropLast())
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Drops back to whatever model the agent is actually running, so one refusal does not
+    /// repeat on every subsequent message in the session.
+    func fallBackToAgentDefaultModel() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.configuration?.model = ""
+            self.currentModelPromise.set(self.reportedModel)
+        }
+    }
+
+    /// The model Kite last asked the agent to use, for reporting which one was refused.
+    var requestedModel: String {
+        return configuration?.model ?? ""
     }
 
     /// Streams agent response chunks, plans, task/tool updates, and future ACP update types.
@@ -935,9 +1143,16 @@ final class WorkspaceACPClient {
             self.sendRequest(method: "session/prompt", params: [
                 "sessionId": sessionId,
                 "prompt": [["type": "text", "text": text]]
-            ]) { response in
+            ]) { [weak self] response in
                 if let error = response["error"] as? [String: Any] {
-                    completion(.failure(WorkspaceACPClientError.remote(error["message"] as? String ?? "ACP prompt failed")))
+                    let message = error["message"] as? String ?? "ACP prompt failed"
+                    if let detail = WorkspaceACPClient.modelRejectionDetail(in: message) {
+                        let refused = self?.requestedModel ?? ""
+                        self?.fallBackToAgentDefaultModel()
+                        completion(.failure(WorkspaceACPClientError.modelUnavailable(model: refused, detail: detail)))
+                    } else {
+                        completion(.failure(WorkspaceACPClientError.remote(message)))
+                    }
                 } else {
                     completion(.success(response["result"] as? [String: Any] ?? [:]))
                 }
@@ -962,7 +1177,25 @@ final class WorkspaceACPClient {
         statusPromise.set(.connecting)
 
         guard FileManager.default.fileExists(atPath: configuration.workingDirectory) else {
-            statusPromise.set(.failed("Working directory does not exist"))
+            /// Naming it matters: a profile copied from another Mac points at a home directory
+            /// that does not exist here.
+            statusPromise.set(.failed("Folder does not exist: \(configuration.workingDirectory)"))
+            return
+        }
+
+        let searchPath = WorkspaceACPClient.agentSearchPath()
+        let launch: (executable: String, arguments: [String])
+        switch WorkspaceACPClient.resolveLaunch(
+            executable: configuration.executable,
+            arguments: configuration.arguments,
+            searchPath: searchPath
+        ) {
+        case let .resolved(executable, arguments):
+            launch = (executable, arguments)
+        case let .missing(command):
+            statusPromise.set(.failed(command.isEmpty
+                ? "Enter the program to run under Agent Command."
+                : "Could not find “\(command)”. Install it, or enter its full path under Program."))
             return
         }
 
@@ -970,10 +1203,10 @@ final class WorkspaceACPClient {
         let inputPipe = Pipe()
         let outputPipe = Pipe()
         let errorPipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: configuration.executable)
-        process.arguments = configuration.arguments
+        process.executableURL = URL(fileURLWithPath: launch.executable)
+        process.arguments = launch.arguments
         process.currentDirectoryURL = URL(fileURLWithPath: configuration.workingDirectory, isDirectory: true)
-        process.environment = WorkspaceACPClient.agentEnvironment()
+        process.environment = WorkspaceACPClient.agentEnvironment(searchPath: searchPath)
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
         process.standardError = errorPipe
@@ -1093,15 +1326,24 @@ final class WorkspaceACPClient {
             }
             self.sessionId = sessionId
             self.modelUsesConfigOption = WorkspaceACPClient.usesConfigOptionForModel(result)
-            self.modelsPromise.set(WorkspaceACPClient.parseModels(from: result))
+            let available = WorkspaceACPClient.parseModels(from: result)
+            self.modelsPromise.set(available)
             let reported = WorkspaceACPClient.parseCurrentModel(from: result)
+            self.reportedModel = reported
             self.currentModelPromise.set(reported)
             self.statusPromise.set(.connected(agentName: self.agentName ?? configuration.provider.title))
             /// The model is requested over ACP rather than on the command line, because not
             /// every agent accepts a --model flag.
             let desired = configuration.model.trimmingCharacters(in: .whitespacesAndNewlines)
             if !desired.isEmpty, desired != reported {
-                self.selectModel(desired)
+                /// A model saved from an earlier session may no longer be offered — a different
+                /// agent version, or a different account. Asking for it anyway is what produced
+                /// an API rejection mid-conversation, so settle it here instead.
+                if available.isEmpty || available.contains(where: { $0.id == desired }) {
+                    self.selectModel(desired)
+                } else {
+                    self.configuration?.model = ""
+                }
             }
         }
     }
@@ -1289,9 +1531,12 @@ final class WorkspaceACPClient {
     }
 }
 
-private enum WorkspaceACPClientError: LocalizedError {
+enum WorkspaceACPClientError: LocalizedError {
     case notConnected
     case remote(String)
+    /// The agent ran, but refused the model. Kept separate from `remote` so the message can
+    /// say what to do about it instead of repeating a raw API payload.
+    case modelUnavailable(model: String, detail: String)
 
     var errorDescription: String? {
         switch self {
@@ -1299,6 +1544,9 @@ private enum WorkspaceACPClientError: LocalizedError {
             return "ACP agent is not connected"
         case let .remote(message):
             return message
+        case let .modelUnavailable(model, detail):
+            let subject = model.isEmpty ? "That model" : "“\(model)”"
+            return "\(subject) is not available on your account, so Kite switched back to the agent's default model. Pick a different model under Settings → Profiles & Automation.\n\nThe agent said:\n\(detail)"
         }
     }
 }

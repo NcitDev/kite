@@ -21,30 +21,22 @@ not notarized. macOS will refuse to open it on the first try:
 > "Kite" Not Opened — Apple could not verify "Kite" is free of malware that may harm your
 > Mac or compromise your privacy.
 
-**On macOS 15 (Sequoia) and later — including macOS 26 — Control-clicking and choosing Open
-no longer works.** Apple removed that bypass. Use one of these instead.
-
-**Through System Settings:**
-
-1. Double-click Kite, then click **Done** on the dialog. This one attempt is required; the
-   option below does not appear until macOS has blocked the app once.
-2. Open **System Settings → Privacy & Security** and scroll to the **Security** section.
-3. Next to *"Kite" was blocked to protect your Mac*, click **Open Anyway**.
-4. Authenticate, then click **Open Anyway** once more.
-
-**Or from the Terminal**, which skips all of the above:
+Open **Terminal** (Applications → Utilities, or search for it with Spotlight), paste this,
+and press Return:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Kite.app
 ```
 
-**Or use the script in the disk image**, which is the quickest route. `Install Kite.command`
-copies Kite to Applications, clears the flag, launches it, and closes itself. It cannot be
-double-clicked — macOS blocks downloaded scripts too, for the same reason it blocks the app.
-Open Terminal, type `bash ` including the trailing space, drag the script in, press Return.
+Then open Kite normally.
 
-Either way, only the first launch needs it. The flag is applied by the browser that
-downloaded the file, so a copy moved off this machine by other means may not need it at all.
+This has to be typed into a terminal rather than done by double-clicking something we ship:
+macOS blocks downloaded scripts exactly as it blocks downloaded apps, so a script bundled in
+the disk image would arrive carrying the same flag it is meant to remove. Control-clicking
+and choosing Open does not work either — Apple removed that bypass in macOS 15 (Sequoia).
+
+Only the first launch needs this. The flag is applied by the browser that downloaded the
+file, so a copy moved off this machine by other means may not need it at all.
 
 ## Connecting an agent
 

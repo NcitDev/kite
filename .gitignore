@@ -18,3 +18,7 @@ core-xprojects/dav1d/build
 core-xprojects/tde2e/build
 # Local Telegram API credentials — see packages/ApiCredentials/Credentials.example.swift
 packages/ApiCredentials/Sources/ApiCredentials/Credentials.swift
+
+# Packaged DMGs and other release artifacts
+build/dist/
+build/

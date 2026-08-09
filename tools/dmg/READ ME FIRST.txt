@@ -1,0 +1,70 @@
+Kite — installing
+=================
+
+1. Drag Kite onto the Applications folder in this window.
+2. macOS will refuse to open it the first time. Read on.
+
+
+Why macOS blocks it
+-------------------
+
+    "Kite" Not Opened
+    Apple could not verify "Kite" is free of malware that may harm your Mac
+    or compromise your privacy.
+
+This is not a detection. macOS refuses to run any app that has not been
+notarized by Apple, and notarization requires a paid Apple Developer ID that
+this build does not have. The app is signed, but with an ad-hoc signature
+that carries no identity Apple recognises.
+
+You are trusting the person who gave you this file. That is a real decision,
+and no amount of clicking makes it not one.
+
+
+Fixing it — the quick way
+-------------------------
+
+Open Terminal (Applications > Utilities, or search for it with Spotlight),
+paste this line, and press Return:
+
+    xattr -dr com.apple.quarantine /Applications/Kite.app
+
+Then open Kite normally. Only the first launch needs this.
+
+
+Fixing it — without typing
+--------------------------
+
+There is a "Fix Gatekeeper.command" file in this window that does the above
+and then launches Kite.
+
+DOUBLE-CLICKING IT WILL NOT WORK. macOS blocks downloaded scripts too, for
+the obvious reason that a downloaded script which could switch off Gatekeeper
+would make Gatekeeper pointless. To run it:
+
+    1. Open Terminal
+    2. Type:  bash          <- including the space after it
+    3. Drag "Fix Gatekeeper.command" into the Terminal window
+    4. Press Return
+
+
+Fixing it — through System Settings
+-----------------------------------
+
+If you would rather not use Terminal at all:
+
+    1. Double-click Kite and click Done on the warning. This failed attempt
+       is required — the option below does not appear until macOS has
+       blocked the app at least once.
+    2. Open System Settings > Privacy & Security and scroll to Security.
+    3. Next to '"Kite" was blocked to protect your Mac', click Open Anyway.
+    4. Authenticate, then click Open Anyway again.
+
+Note that on macOS 15 (Sequoia) and later, Control-clicking the app and
+choosing Open no longer works. Apple removed that shortcut.
+
+
+More
+----
+
+https://github.com/NcitDev/kite

@@ -38,6 +38,11 @@ no longer works.** Apple removed that bypass. Use one of these instead.
 xattr -dr com.apple.quarantine /Applications/Kite.app
 ```
 
+**Or use the script in the disk image.** It carries a `Fix Gatekeeper.command` that clears
+the flag and launches Kite. It cannot be double-clicked — macOS blocks downloaded scripts
+too, for the same reason it blocks the app. Open Terminal, type `bash ` including the
+trailing space, drag the script in, and press Return.
+
 Either way, only the first launch needs it. The flag is applied by the browser that
 downloaded the file, so a copy moved off this machine by other means may not need it at all.
 

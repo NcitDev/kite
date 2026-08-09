@@ -100,6 +100,15 @@ trap 'rm -rf "$STAGE"' EXIT
 cp -R "$APP" "$STAGE/Kite.app"
 ln -s /Applications "$STAGE/Applications"
 
+# Shipped alongside the app because an unnotarized build is refused on first launch and the
+# fix is not discoverable. The .command cannot be double-clicked — macOS blocks downloaded
+# scripts as well — so both files explain dragging it into Terminal instead.
+if [ -d "$REPO/tools/dmg" ]; then
+  cp "$REPO/tools/dmg/READ ME FIRST.txt" "$STAGE/"
+  cp "$REPO/tools/dmg/Fix Gatekeeper.command" "$STAGE/"
+  chmod +x "$STAGE/Fix Gatekeeper.command"
+fi
+
 DMG="$OUT/Kite-$VERSION.dmg"
 rm -f "$DMG"
 hdiutil create -volname "Kite $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null

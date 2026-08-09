@@ -106,13 +106,50 @@ endpoint — [whisper.cpp](https://github.com/ggerganov/whisper.cpp), faster-whi
 LocalAI and Speaches all expose the same API. Nothing leaves the machine, and it works
 without Telegram Premium.
 
+**Kite does not bundle a speech model and will not download one for you.** You run the
+server; Kite just posts audio to it. With whisper.cpp that is three steps:
+
+**1. Install whisper.cpp**
+
+```sh
+brew install whisper-cpp
+```
+
+**2. Download a model.** They are not included with the formula. Pick one by how much
+accuracy you want to pay for:
+
+```sh
+mkdir -p ~/.whisper-models
+curl -L -o ~/.whisper-models/ggml-base.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+```
+
+| Model | Download | Notes |
+| --- | --- | --- |
+| `ggml-tiny.bin` | 78 MB | Fastest, noticeably rougher |
+| `ggml-base.bin` | 148 MB | Good default; fine for voice notes |
+| `ggml-small.bin` | 488 MB | Better with accents and noise |
+| `ggml-medium.bin` | 1.5 GB | Slower, clearly more accurate |
+| `ggml-large-v3.bin` | 3.1 GB | Best, wants an M-series with RAM to spare |
+
+Swap the filename in the `curl` line for any of these. The `.en` variants
+(`ggml-base.en.bin`) are English-only and a little sharper at it.
+
+**3. Run the server**
+
 ```sh
 whisper-server -m ~/.whisper-models/ggml-base.bin \
   --host 127.0.0.1 --port 8080 \
   --inference-path /v1/audio/transcriptions --convert -l auto
 ```
 
-Then enable it under **Settings → Profiles & Automation → Local transcription**.
+`--convert` lets it accept Telegram's OGG/Opus voice notes, and `-l auto` detects the
+language rather than assuming English. Leave it running in a terminal, or wrap it in a
+launchd agent if you want it always available.
+
+Then enable it under **Settings → Profiles & Automation → Local transcription** and press
+**Check Connection** — it tells you straight away whether the server is reachable, rather
+than leaving you to find out when a voice note fails to transcribe.
 
 ## Building
 

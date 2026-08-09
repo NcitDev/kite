@@ -1563,10 +1563,30 @@ private func workspaceProfileEntries(
         if active.localTranscription.isEnabled {
             entries.append(.input(sectionId: sectionId, index: index, value: .string(active.localTranscription.endpoint), error: nil, identifier: workspaceTranscriptionEndpointId, mode: .plain, data: .init(viewType: .innerItem), placeholder: InputDataInputPlaceholder("Endpoint"), inputPlaceholder: "http://127.0.0.1:8080/v1/audio/transcriptions", filter: { $0 }, limit: 1024))
             index += 1
-            entries.append(.input(sectionId: sectionId, index: index, value: .string(active.localTranscription.model), error: nil, identifier: workspaceTranscriptionModelId, mode: .plain, data: .init(viewType: .lastItem), placeholder: InputDataInputPlaceholder("Model"), inputPlaceholder: "whisper-1", filter: { $0 }, limit: 256))
+            entries.append(.input(sectionId: sectionId, index: index, value: .string(active.localTranscription.model), error: nil, identifier: workspaceTranscriptionModelId, mode: .plain, data: .init(viewType: .innerItem), placeholder: InputDataInputPlaceholder("Model"), inputPlaceholder: "whisper-1", filter: { $0 }, limit: 256))
+            index += 1
+            /// A server that is not running otherwise announces itself much later, as a voice
+            /// note that simply never transcribes.
+            entries.append(.general(sectionId: sectionId, index: index, value: .none, error: nil, identifier: InputDataIdentifier("workspace.transcription.check"), data: .init(
+                name: "Check Connection",
+                color: theme.colors.accent,
+                type: .next,
+                viewType: .lastItem,
+                action: {
+                    let settings = active.localTranscription
+                    WorkspaceVoiceTranscriber.shared.probe(settings: settings, completion: { result in
+                        switch result {
+                        case let .success(message):
+                            alert(for: context.window, header: "Transcription server found", info: message)
+                        case let .failure(error):
+                            alert(for: context.window, header: "No transcription server", info: (error.errorDescription ?? "The endpoint did not answer.") + "\n\nStart one with:\nbrew install whisper-cpp\nwhisper-server -m ~/.whisper-models/ggml-base.bin --host 127.0.0.1 --port 8080 --inference-path /v1/audio/transcriptions --convert -l auto\n\nSetup instructions: github.com/NcitDev/kite#local-voice-transcription")
+                        }
+                    })
+                }
+            )))
             index += 1
         }
-        entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Works with any OpenAI-compatible transcription server — whisper.cpp, faster-whisper-server, LocalAI, Speaches. Audio never leaves this Mac and Telegram Premium is not required. When this is off, Voice to text uses Telegram's own transcription, which needs Premium."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
+        entries.append(.desc(sectionId: sectionId, index: index, text: .plain("Needs a speech-to-text server running on this Mac — Kite does not bundle one and will not download a model for you. The usual setup is Homebrew's whisper-cpp plus a model file; the full instructions are at github.com/NcitDev/kite#local-voice-transcription. Any OpenAI-compatible server works: whisper.cpp, faster-whisper-server, LocalAI, Speaches. Audio never leaves this Mac and Telegram Premium is not required. When this is off, Voice to text uses Telegram's own transcription, which needs Premium."), data: .init(color: theme.colors.listGrayText, viewType: .textBottomItem)))
         index += 1
     }
 

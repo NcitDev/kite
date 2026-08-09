@@ -68,6 +68,35 @@ final class WorkspaceVoiceTranscriber {
         self.session = URLSession(configuration: configuration)
     }
 
+    /// Answers whether anything is actually listening on the configured endpoint. Without this
+    /// a misconfigured or unstarted server only shows up later, as a voice note that quietly
+    /// fails to transcribe. Any HTTP reply counts as reachable — a transcription server given
+    /// an empty body answers 4xx, which still proves it is there.
+    func probe(settings: WorkspaceLocalTranscription, completion: @escaping (Result<String, WorkspaceTranscriptionError>) -> Void) {
+        guard let url = settings.resolvedURL else {
+            completion(.failure(.notConfigured))
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 8
+        let task = session.dataTask(with: request) { _, response, error in
+            DispatchQueue.main.async {
+                if let error = error as NSError?, error.domain == NSURLErrorDomain {
+                    completion(.failure(.unreachable(error.localizedDescription)))
+                    return
+                }
+                if let error {
+                    completion(.failure(.unreachable(error.localizedDescription)))
+                    return
+                }
+                let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+                completion(.success("The server answered on \(url.host ?? "the endpoint") (HTTP \(code))."))
+            }
+        }
+        task.resume()
+    }
+
     /// Downloads the voice note if needed, then posts it to the configured server.
     func transcribe(
         message: Message,

@@ -23,37 +23,79 @@ func draw(into ctx: CGContext, size: CGFloat) {
     ctx.scaleBy(x: scale, y: scale)
     ctx.setLineJoin(.round)
 
-    // Squircle plate on the standard Big Sur 824pt inset.
+    let space = CGColorSpaceCreateDeviceRGB()
+
+    // Same construction as Telegram's macOS icon — a light squircle plate, a saturated disc
+    // inset within it, and a white glyph on the disc — so Kite reads as the same kind of app
+    // in the Dock. The hue stays indigo rather than Telegram's cyan so the two never blur
+    // together at a glance.
     let plate = CGRect(x: 100, y: 100, width: 824, height: 824)
     let platePath = CGPath(roundedRect: plate, cornerWidth: 185.4, cornerHeight: 185.4, transform: nil)
 
     ctx.saveGState()
     ctx.addPath(platePath)
     ctx.clip()
-    let space = CGColorSpaceCreateDeviceRGB()
-    let gradient = CGGradient(
+    let plateGradient = CGGradient(
         colorsSpace: space,
         colors: [
-            CGColor(red: 0.486, green: 0.424, blue: 1.000, alpha: 1),
-            CGColor(red: 0.239, green: 0.157, blue: 0.722, alpha: 1)
+            CGColor(red: 1.000, green: 1.000, blue: 1.000, alpha: 1),
+            CGColor(red: 0.925, green: 0.925, blue: 0.945, alpha: 1)
         ] as CFArray,
         locations: [0, 1]
     )!
-    ctx.drawLinearGradient(gradient,
+    ctx.drawLinearGradient(plateGradient,
                            start: CGPoint(x: 512, y: 924),
                            end: CGPoint(x: 512, y: 100),
                            options: [])
     ctx.restoreGState()
 
-    let kite = kitePath()
-    // Filling and stroking the same path with a round join rounds the four corners,
-    // which keeps the silhouette from looking sharp and dated at large sizes.
-    let corner: CGFloat = 46
+    // A hairline keeps the white plate from dissolving into a light desktop or Finder list.
+    ctx.saveGState()
+    ctx.addPath(platePath)
+    ctx.setStrokeColor(CGColor(red: 0.72, green: 0.72, blue: 0.76, alpha: 0.55))
+    ctx.setLineWidth(4)
+    ctx.strokePath()
+    ctx.restoreGState()
+
+    let discRadius: CGFloat = 305
+    let centre = CGPoint(x: 512, y: 512)
+    let disc = CGRect(x: centre.x - discRadius, y: centre.y - discRadius,
+                      width: discRadius * 2, height: discRadius * 2)
 
     ctx.saveGState()
-    ctx.setShadow(offset: CGSize(width: 0, height: -12),
-                  blur: 34,
-                  color: CGColor(red: 0.10, green: 0.05, blue: 0.35, alpha: 0.35))
+    ctx.addEllipse(in: disc)
+    ctx.clip()
+    let discGradient = CGGradient(
+        colorsSpace: space,
+        colors: [
+            CGColor(red: 0.518, green: 0.451, blue: 1.000, alpha: 1),
+            CGColor(red: 0.267, green: 0.176, blue: 0.784, alpha: 1)
+        ] as CFArray,
+        locations: [0, 1]
+    )!
+    // Diagonal, matching how Telegram lights its disc from the top-left.
+    ctx.drawLinearGradient(discGradient,
+                           start: CGPoint(x: centre.x - discRadius, y: centre.y + discRadius),
+                           end: CGPoint(x: centre.x + discRadius, y: centre.y - discRadius),
+                           options: [])
+    ctx.restoreGState()
+
+    // The kite is authored around (512, 522); recentre it on the disc and shrink it to sit
+    // inside with a margin comparable to Telegram's plane.
+    var transform = CGAffineTransform.identity
+        .translatedBy(x: centre.x, y: centre.y)
+        .scaledBy(x: 0.70, y: 0.70)
+        .translatedBy(x: -512, y: -522)
+    let kite = kitePath().copy(using: &transform)!
+
+    // Filling and stroking the same path with a round join rounds the four corners,
+    // which keeps the silhouette from looking sharp and dated at large sizes.
+    let corner: CGFloat = 34
+
+    ctx.saveGState()
+    ctx.setShadow(offset: CGSize(width: 0, height: -8),
+                  blur: 22,
+                  color: CGColor(red: 0.08, green: 0.03, blue: 0.30, alpha: 0.30))
     // Fill and stroke each cast their own shadow, and the stroke's would land on top of the
     // fill as a dark inner edge. Compositing both in one transparency layer casts a single
     // shadow behind the finished shape instead.
@@ -66,11 +108,12 @@ func draw(into ctx: CGContext, size: CGFloat) {
     ctx.endTransparencyLayer()
     ctx.restoreGState()
 
-    // Left half in a cooler tint reads as the fold in a piece of folded paper.
+    // Left half in a cooler tint reads as the fold in a piece of folded paper, the same trick
+    // Telegram's plane uses to suggest a crease.
     ctx.saveGState()
-    ctx.clip(to: CGRect(x: 0, y: 0, width: 512, height: grid))
+    ctx.clip(to: CGRect(x: 0, y: 0, width: centre.x, height: grid))
     ctx.addPath(kite)
-    let fold = CGColor(red: 0.796, green: 0.776, blue: 0.976, alpha: 1)
+    let fold = CGColor(red: 0.792, green: 0.776, blue: 0.965, alpha: 1)
     ctx.setFillColor(fold)
     ctx.setStrokeColor(fold)
     ctx.setLineWidth(corner)

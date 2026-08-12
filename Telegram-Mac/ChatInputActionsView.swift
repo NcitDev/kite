@@ -219,6 +219,24 @@ enum CodexAssistantAction: String, Codable, CaseIterable {
     }
 }
 
+/// A composer draft that starts with `@prompt ` is a request to the agent, not a message.
+/// Parsing is strict on purpose: anything that does not match sends as ordinary text, so a
+/// mistyped command can be seen and corrected rather than silently swallowed.
+enum WorkspaceInlineAgentCommand {
+    static let trigger = "@prompt"
+
+    /// The agent request inside `text`, or nil when it is a plain message.
+    static func parse(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.lowercased().hasPrefix(trigger) else { return nil }
+        let rest = trimmed.dropFirst(trigger.count)
+        /// `@promptly hi` is a message; the command needs a break after the trigger.
+        guard let boundary = rest.first, boundary.isWhitespace else { return nil }
+        let prompt = rest.trimmingCharacters(in: .whitespacesAndNewlines)
+        return prompt.isEmpty ? nil : prompt
+    }
+}
+
 private struct CodexAssistantHistoryEntry: Codable {
     let id: UUID
     let action: CodexAssistantAction
@@ -1334,6 +1352,10 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
     /// Guards the prompt-assembly stage only; once submitted the session owns the request.
     private var activeAction: CodexAssistantAction?
     private var currentStatus: WorkspaceACPStatus = .disconnected
+    /// A composer `@prompt` request that arrived before the first status delivery. `run` reads
+    /// `currentStatus`, so it must wait for the subscription in `viewDidLoad` to fire once.
+    private var pendingInlinePrompt: String?
+    private var hasReceivedStatus = false
 
     init(chatInteraction: ChatInteraction) {
         let accountId = chatInteraction.context.account.id.int64
@@ -1353,6 +1375,16 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
         super.init(chatInteraction.context)
         bar = .init(height: 0)
         _frameRect = NSMakeRect(0, 0, 420, 600)
+    }
+
+    /// Runs a composer `@prompt` command as an Ask-agent request. Safe to call before the view
+    /// has loaded: the prompt is held until the agent status is known.
+    func runInline(prompt: String) {
+        if hasReceivedStatus {
+            run(action: .custom, customPrompt: prompt)
+        } else {
+            pendingInlinePrompt = prompt
+        }
     }
 
     /// Renders whatever the session is doing, so reopening the panel resumes mid-request.
@@ -1417,6 +1449,11 @@ private final class CodexAssistantController: TelegramGenericViewController<Code
             let actions = Set(CodexAssistantAction.allCases.filter { state.activeProfile.isEnabled($0) })
             self?.currentStatus = status
             self?.genericView.update(status: status, enabledActions: actions, rangePreset: state.activeProfile.chatRangePreset, agentTitle: state.acp.provider.title)
+            self?.hasReceivedStatus = true
+            if let pending = self?.pendingInlinePrompt {
+                self?.pendingInlinePrompt = nil
+                self?.run(action: .custom, customPrompt: pending)
+            }
         }))
 
         genericView.updateHistory(session.entries)
@@ -2120,8 +2157,28 @@ class ChatInputActionsView: View {
             codex.popover?.hide()
             return
         }
+        presentCodex()
+    }
+
+    /// A composer `@prompt` command: reuses the open panel, or opens it already running.
+    /// Returns false when the assistant is unavailable in this chat, so the caller lets the
+    /// text send as an ordinary message instead of swallowing it.
+    func runInlineAgentPrompt(_ prompt: String) -> Bool {
+        guard !codex.isHidden else { return false }
+        if codex.popover != nil, let codexController {
+            codexController.runInline(prompt: prompt)
+            return true
+        }
+        presentCodex(inlinePrompt: prompt)
+        return true
+    }
+
+    private func presentCodex(inlinePrompt: String? = nil) {
         let controller = CodexAssistantController(chatInteraction: chatInteraction)
         codexController = controller
+        if let inlinePrompt {
+            controller.runInline(prompt: inlinePrompt)
+        }
         /// `static` disables the mouse-out auto-hide. A request in flight must survive the cursor
         /// leaving the window; clicking outside or pressing Escape still dismisses the panel.
         showPopover(

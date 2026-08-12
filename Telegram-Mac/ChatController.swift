@@ -3875,6 +3875,15 @@ class ChatController: EditableViewController<ChatControllerView>, Notifable, Tab
         chatInteraction.sendMessage = { [weak self] silent, atDate, messageEffect in
             if let strongSelf = self, !strongSelf.nextTransaction.isExutable {
                 let presentation = strongSelf.chatInteraction.presentation
+                /// A draft starting with `@prompt` is addressed to the agent, not the chat:
+                /// run it through the assistant panel and clear the composer instead of
+                /// sending. Message edits are exempt so old text stays editable verbatim.
+                if presentation.interfaceState.editState == nil,
+                   let inlinePrompt = WorkspaceInlineAgentCommand.parse(presentation.effectiveInput.inputText),
+                   strongSelf.genericView.inputView.runInlineAgentPrompt(inlinePrompt) {
+                    strongSelf.chatInteraction.clearInput()
+                    return
+                }
                 let peerId = strongSelf.chatInteraction.peerId
                 let currentSendAsPeerId = presentation.currentSendAsPeerId
                 if presentation.abilityToSend {

@@ -1133,6 +1133,10 @@ class ChatInputView: View, Notifable {
     var emojiView: NSView {
         return self.actionsView.entertaiments
     }
+    /// A composer `@prompt` command, routed to the assistant panel the actions view owns.
+    func runInlineAgentPrompt(_ prompt: String) -> Bool {
+        return self.actionsView.runInlineAgentPrompt(prompt)
+    }
     func makeSpoiler() {
         self.textView.inputApplyTransform(.attribute(TextInputAttributes.spoiler))
     }

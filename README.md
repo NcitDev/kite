@@ -65,6 +65,10 @@ Each action can be switched off in settings, so the panel only shows what you ac
 **Conversation range.** Actions default to today. Turn *Today* off to use a saved range
 instead — 3, 7 or 30 days.
 
+**Inline command.** Type `@prompt` followed by your request straight in the message box and
+press Enter — it goes to the agent instead of the chat, and the panel opens with the answer.
+The draft is never sent as a message.
+
 **While it runs.** The panel reports what the agent is doing — thinking, writing, or the name
 of the tool it called — and a request can be stopped at any point. Requests survive the panel
 being closed, so you can start something long and come back to the result.

@@ -14,6 +14,8 @@ import TelegramCore
 import TGUIKit
 
 enum WorkspaceProfileKind: String, Codable {
+    case base
+    /// Kept for stored states created before Base replaced the Work/Home pair.
     case work
     case home
     case custom
@@ -76,7 +78,7 @@ struct WorkspaceProfile: Codable, Equatable {
     var includedPeerIds: [Int64]
     /// Namespaced switches allow later features to become profile-scoped without a migration.
     var featureFlags: [String: Bool]
-    /// Knowledge integrations are profile-scoped so Work and Home never share sources implicitly.
+    /// Knowledge integrations are profile-scoped so two profiles never share sources implicitly.
     var knowledgeIntegrations: [WorkspaceKnowledgeIntegration]
     /// How far back the in-chat panel looks once "Today" is cleared.
     var chatRangePreset: WorkspaceChatRangePreset
@@ -329,24 +331,10 @@ struct WorkspaceProfileState: Codable, Equatable {
     var acpProfiles: [String: WorkspaceACPConfiguration]
 
     static var defaultValue: WorkspaceProfileState {
-        let work = WorkspaceProfile(
-            id: "builtin.work",
-            name: "Work",
-            kind: .work,
-            showsAllFolders: true,
-            visibleFolderIds: [],
-            receivesNotifications: true,
-            showsStories: true,
-            includedPeerIds: [],
-            featureFlags: [:],
-            knowledgeIntegrations: [],
-            chatRangePreset: .sevenDays,
-            localTranscription: .defaultValue
-        )
-        let home = WorkspaceProfile(
-            id: "builtin.home",
-            name: "Home",
-            kind: .home,
+        let base = WorkspaceProfile(
+            id: "builtin.base",
+            name: "Base",
+            kind: .base,
             showsAllFolders: true,
             visibleFolderIds: [],
             receivesNotifications: true,
@@ -359,8 +347,8 @@ struct WorkspaceProfileState: Codable, Equatable {
         )
         return WorkspaceProfileState(
             schemaVersion: 3,
-            activeProfileId: work.id,
-            profiles: [work, home],
+            activeProfileId: base.id,
+            profiles: [base],
             acp: .defaultValue,
             acpProfiles: [:]
         )

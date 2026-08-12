@@ -21,6 +21,8 @@ front of you.
 
 One Telegram account usually holds several unrelated lives: a job, a side project, family.
 A profile is a saved slice of that account — a set of chat folders, plus its own agent setup.
+A fresh install starts with a single profile called **Base**; add more when you want separate
+contexts, and delete them when you stop needing them.
 
 <img src="docs/images/settings.png" width="760" alt="Profiles & Automation settings">
 
